@@ -31,6 +31,7 @@ window.supabase = {createClient() {
         if (type !== 'select' && localStorage.getItem('test.saveDelay')) await new Promise(resolve=>setTimeout(resolve,Number(localStorage.getItem('test.saveDelay'))));
         if (localStorage.getItem('test.fail') || (type !== 'select' && localStorage.getItem('test.failSave'))) return {error:{message:'Network unavailable'}};
         const data = db(), uid = session()?.user.id;
+        if (type === 'select' && localStorage.getItem('test.readDelay')) await new Promise(resolve=>setTimeout(resolve,Number(localStorage.getItem('test.readDelay'))));
         const matches = item => item.user_id === uid && filters.every(([k,v]) => item[k] === v);
         let rows = data[table].filter(matches);
         if (type==='insert') {
@@ -39,8 +40,11 @@ window.supabase = {createClient() {
         }
         if (type==='update') {rows.forEach(row => Object.assign(row,payload));}
         if (type==='delete') data[table]=data[table].filter(item => !matches(item));
-        store(data);
+        if (type !== 'select') store(data);
+        if (type !== 'select' && localStorage.getItem('test.loseResponse')) {localStorage.removeItem('test.loseResponse'); return {error:{message:'Response lost'}};}
         if (single && rows.length!==1) return {error:{code:'PGRST116',message:'No row'}};
+        // PostgreSQL JSONB does not preserve the insertion order of object keys.
+        if (type === 'select') rows = rows.map(row=>({...row,...(row.expenses ? {expenses:row.expenses.map(exp=>Object.fromEntries(Object.entries(exp).sort(([a],[b])=>a.localeCompare(b))))} : {})}));
         return {data:single?rows[0]:rows};
       }).then(resolve,reject);}
     }; return q;

@@ -12,12 +12,13 @@ async function app({signedIn = true, records = [], route = '', legacy = null} = 
   });
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
   const browser = await chromium.launch({headless:true,...(process.env.CHROME_EXECUTABLE ? {executablePath:process.env.CHROME_EXECUTABLE} : {})});
-  const page = await browser.newPage({viewport:{width:1280,height:900}});
+  const context = await browser.newContext({viewport:{width:1280,height:900}});
+  const page = await context.newPage();
   page.setDefaultTimeout(10000);
   const errors = [];page.on('pageerror',error=>errors.push(error.message));page.on('dialog',dialog=>dialog.accept());
-  await page.route('**/config.js',route=>route.fulfill({contentType:'application/javascript',body:"window.CARBOOK_CONFIG={supabaseUrl:'https://test.supabase.co',supabasePublishableKey:'sb_publishable_test'};"}));
-  await page.route('**/vendor/supabase.js',route=>route.fulfill({contentType:'application/javascript',body:fs.readFileSync(path.join(__dirname,'mock-supabase.js'),'utf8')}));
-  await page.addInitScript(({signedIn,records,legacy})=>{
+  await context.route('**/config.js',route=>route.fulfill({contentType:'application/javascript',body:"window.CARBOOK_CONFIG={supabaseUrl:'https://test.supabase.co',supabasePublishableKey:'sb_publishable_test'};"}));
+  await context.route('**/vendor/supabase.js',route=>route.fulfill({contentType:'application/javascript',body:fs.readFileSync(path.join(__dirname,'mock-supabase.js'),'utf8')}));
+  await context.addInitScript(({signedIn,records,legacy})=>{
     if (!localStorage.getItem('test.initialized')) {
       localStorage.setItem('test.initialized','yes');
       if (legacy !== null) localStorage.setItem('carbook.records.v2',legacy);

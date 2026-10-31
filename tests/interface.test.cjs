@@ -154,7 +154,7 @@ test('garage cards, direct links, refresh, browser history, and no migration exp
     assert.equal(await page.locator('#import-prompt, #import-local, #dismiss-import').count(),0);
     assert.equal(await page.locator('#status-bar').isVisible(),false);
     assert.equal(await page.locator('[data-vehicle="test-car"] .card-profit strong').textContent(),'$1,300.50');
-    assert.equal(await page.locator('[data-vehicle="sold-car"] .card-profit span').textContent(),'Actual profit');
+    assert.equal(await page.locator('[data-vehicle="sold-car"] .card-profit-labels > span:last-child').textContent(),'Actual profit');
     assert.equal(await page.locator('[data-vehicle="sold-car"] .card-profit strong').textContent(),'$2,500');
     assert.equal(await page.locator('[data-vehicle="unvalued-car"] .card-profit').count(),0);
     assert.equal(await page.locator('[data-vehicle="zero-car"] .card-profit strong').textContent(),'$0');
@@ -395,4 +395,93 @@ test('read-only expenses, Done and Cancel, pasted currency, and financial colors
     for (const width of [320,390,760,1280]) {await page.setViewportSize({width,height:900});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);}
     assert.deepEqual(env.errors,[]);
   } finally {await env.close();}
+});
+
+test('saved SOLD badges and stronger financial colors stay balanced on desktop and mobile',async()=>{
+  const env=await app({records:[fixture,{...fixture,id:'sold',name:'Sold vehicle',sold_price:10000},{...fixture,id:'loss',name:'Loss vehicle',sold_price:0},{...fixture,id:'zero',name:'Zero vehicle',expenses:[],estimated_value:0}]});const {page}=env;
+  try {
+    assert.equal(await page.locator('[data-vehicle="test-car"] .sold-badge').count(),0);
+    for (const width of [1280,760,390,320]) {
+      await page.setViewportSize({width,height:900});
+      const card=page.locator('[data-vehicle="sold"]');
+      const badge=await card.locator('.sold-badge').boundingBox(), value=await card.locator('strong').boundingBox(), title=await card.locator('h2').boundingBox();
+      assert.ok(badge.y>title.y+title.height);assert.ok(badge.x<value.x);assert.ok(badge.y<value.y+value.height);
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      if(width===1280||width===390) await page.screenshot({path:`/tmp/carbook-sold-${width}.png`,fullPage:true,animations:'disabled'});
+    }
+    assert.equal(await page.locator('[data-vehicle="sold"] strong').evaluate(el=>getComputedStyle(el).color),'rgb(8, 127, 70)');
+    assert.equal(await page.locator('[data-vehicle="loss"] strong').evaluate(el=>getComputedStyle(el).color),'rgb(180, 35, 24)');
+    assert.match(await page.locator('[data-vehicle="loss"] strong').textContent(),/^-/);
+    assert.equal(await page.locator('[data-vehicle="zero"] strong').evaluate(el=>getComputedStyle(el).color),'rgb(37, 41, 37)');
+    await page.locator('[data-vehicle="test-car"]').click();await page.locator('#sold-toggle').check();await page.locator('#sold-price').blur();
+    assert.equal(await page.locator('#vehicle-sold').isVisible(),false);assert.equal(await page.locator('#status.error').count(),0);
+    await page.reload();await page.locator('#vehicle-view').waitFor();assert.equal(await page.locator('#sold-toggle').isChecked(),false);
+    await page.locator('#sold-toggle').check();await page.locator('#sold-price').fill('0');await page.locator('#sold-price').blur();await page.locator('#vehicle-sold').waitFor();
+    await page.reload();await page.locator('#vehicle-sold').waitFor();assert.equal(await page.locator('#sold-toggle').isChecked(),true);
+    assert.deepEqual(env.errors,[]);
+  } finally {await env.close();}
+});
+
+test('idle sync leaves DOM and controls stable and late snapshots cannot erase edits',async()=>{
+  const env=await app({records:[fixture]});const {page}=env;
+  try {
+    await page.evaluate(()=>{
+      window.originalCard=document.querySelector('.vehicle-card');window.controlMutations=[];
+      new MutationObserver(records=>window.controlMutations.push(...records.map(r=>r.attributeName))).observe(document.getElementById('logout'),{attributes:true});
+      new MutationObserver(records=>window.controlMutations.push(...records.map(r=>r.attributeName))).observe(document.getElementById('add-vehicle'),{attributes:true});
+      localStorage.setItem('test.readDelay','150');
+    });
+    await page.locator('#add-vehicle').focus();
+    for(let i=0;i<3;i++) {await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await page.waitForTimeout(220);}
+    assert.equal(await page.evaluate(()=>window.originalCard===document.querySelector('.vehicle-card')),true);
+    const reads=await page.evaluate(()=>window.testCloudCalls.filter(call=>call.type==='select').length);
+    await page.waitForFunction(count=>window.testCloudCalls.filter(call=>call.type==='select').length>count,reads,{timeout:34000});
+    await page.waitForTimeout(220);
+    assert.equal(await page.evaluate(()=>window.originalCard===document.querySelector('.vehicle-card')),true);
+    assert.deepEqual(await page.evaluate(()=>window.controlMutations),[]);
+    assert.equal(await page.locator('#add-vehicle').evaluate(el=>el===document.activeElement),true);
+    await page.locator('.vehicle-card').click();
+    await page.evaluate(()=>{localStorage.setItem('test.readDelay','500');window.dispatchEvent(new Event('focus'));});
+    await page.waitForTimeout(80);await page.locator('#expense-description').fill('Pending repair');await page.waitForTimeout(550);
+    assert.equal(await page.locator('#expense-description').inputValue(),'Pending repair');
+    await page.locator('#expense-amount').fill('15.88');await page.locator('#add-expense-form button').click();await page.locator('.expense-row').getByText('Pending repair').waitFor();
+    // A read that started before a successful write must not roll it back.
+    await page.locator('#expense-description').blur();
+    await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await page.waitForTimeout(80);
+    await page.locator('#estimated-value').fill('11,170');await page.locator('#estimated-value').blur();await page.waitForTimeout(650);
+    assert.equal(await page.locator('#estimated-value').inputValue(),'$11,170');
+    assert.equal(await page.locator('#expense-total').textContent(),'$7,215.38');
+    assert.deepEqual(env.errors,[]);
+  } finally {await env.close();}
+});
+
+test('two isolated mock clients sync, retain conflicts, and deduplicate rapid or uncertain expense saves',async()=>{
+  const env=await app({records:[fixture],route:'?vehicle=test-car'});const {page,url}=env;
+  const other=await page.context().newPage();other.on('dialog',d=>d.accept());
+  try {
+    await other.goto(url+'?vehicle=test-car');await other.locator('#vehicle-view').waitFor();
+    await page.evaluate(()=>{localStorage.setItem('test.saveDelay','150');localStorage.setItem('test.loseResponse','1');});
+    await page.locator('#expense-description').fill('One repair');await page.locator('#expense-amount').fill('$40.70');
+    await page.evaluate(()=>{const f=document.getElementById('add-expense-form');f.requestSubmit();f.requestSubmit();f.requestSubmit();});
+    await page.locator('.expense-row').getByText('One repair').waitFor();
+    assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].expenses.filter(e=>e.description==='One repair').length),1);
+    assert.equal(await page.locator('#expense-description').inputValue(),'');
+    await other.evaluate(()=>window.dispatchEvent(new Event('focus')));await other.locator('.expense-row').getByText('One repair').waitFor();
+    await other.locator('#estimated-value').fill('9000');
+    await page.locator('#estimated-value').fill('9200');await page.locator('#estimated-value').blur();
+    await page.waitForFunction(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].estimated_value===9200);
+    await other.evaluate(()=>window.dispatchEvent(new Event('focus')));assert.equal(await other.locator('#estimated-value').inputValue(),'9000');
+    await other.locator('#estimated-value').blur();await other.locator('#status').getByText('This vehicle changed',{exact:false}).waitFor();
+    assert.equal(await other.locator('#estimated-value').inputValue(),'$9,000');
+    await other.locator('#retry').click();await other.locator('#status').getByText('Saved',{exact:true}).waitFor();
+    await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await page.waitForFunction(()=>document.getElementById('estimated-value').value==='$9,000');
+    await page.reload();await page.locator('#vehicle-view').waitFor();assert.equal(await page.locator('#expense-total').textContent(),'$7,240.20');
+    await other.locator('#sold-toggle').check();await other.locator('#sold-price').fill('10000');await other.locator('#sold-price').blur();await other.locator('#vehicle-sold').waitFor();
+    await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await page.locator('#vehicle-sold').waitFor();assert.equal(await page.locator('#sold-toggle').isChecked(),true);
+    await other.locator('#sold-toggle').uncheck();await other.locator('#vehicle-sold').waitFor({state:'hidden'});
+    await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await page.locator('#vehicle-sold').waitFor({state:'hidden'});assert.equal(await page.locator('#sold-toggle').isChecked(),false);
+    await page.locator('#logout').click();await page.locator('#email').fill('test@example.com');await page.locator('#password').fill('password123');await page.locator('#auth-submit').click();await page.locator('.vehicle-card').click();
+    assert.equal(await page.locator('#estimated-value').inputValue(),'$9,000');assert.equal(await page.locator('.expense-row').count(),5);
+    assert.deepEqual(env.errors,[]);
+  } finally {await other.close();await env.close();}
 });

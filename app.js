@@ -18,6 +18,7 @@
   let busy = false, dirty = false, loaded = false, epoch = 0, authMode = 'login', recovery = false;
   let valueTimer, valueQueued = false, valueSaving = false, valueConflict = false;
   let valueTask = null;
+  let syncRequest = null, mutationVersion = 0;
   let notice = {kind:'', scope:''}, noticeTimer, fadeTimer;
   let navigationIndex = Number.isInteger(history.state?.carbookIndex) ? history.state.carbookIndex : 0;
   let restoringHistory = false, renderedPage = null;
@@ -26,6 +27,12 @@
   let vinState = {vin:'', name:'', status:'idle'}, decodeTimer, decodeController, decodeRequest = 0, dialogToken = 0, vinSubmitting = false;
   let renderedVehicle = null, formReturnFocus = null;
   const current = () => cars.find(c => c.id === selectedId);
+  function sameData(a,b) {
+    if (a === b) return true;
+    if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false;
+    const keys = Object.keys(a);
+    return keys.length === Object.keys(b).length && keys.every(key => Object.hasOwn(b,key) && sameData(a[key],b[key]));
+  }
   function motion(element, frames, duration = 180) {
     if (reducedMotion.matches || !element?.animate) return null;
     return element.animate(frames, {duration, easing:'cubic-bezier(.2,.7,.2,1)'});
@@ -165,7 +172,12 @@
         const summary = document.createElement('div'); summary.className = 'card-profit'; summary.dataset.result = profitState(total.profit);
         const label = document.createElement('span'); label.textContent = total.sold ? 'Actual profit' : 'Potential profit';
         const value = document.createElement('strong'); value.textContent = money(total.profit);
-        summary.append(label,value); link.append(summary);
+        if (total.sold) {
+          const labels = document.createElement('div'); labels.className = 'card-profit-labels';
+          const badge = document.createElement('span'); badge.className = 'sold-badge'; badge.textContent = 'SOLD';
+          labels.append(badge,label); summary.append(labels,value);
+        } else summary.append(label,value);
+        link.append(summary);
       }
       item.append(link); gallery.append(item);
       if (activeId === c.id) link.focus({preventScroll:true});
@@ -185,8 +197,10 @@
     } else {
       document.title = c.name + ' · Carbook';
       $('vehicle-title').textContent = c.name; $('vehicle-vin').textContent = c.vin || ''; $('vehicle-vin').hidden = !c.vin;
+      const pendingSold = renderedVehicle === c.id && $('sold-toggle').checked && !$('sold-price').value.trim();
+      $('vehicle-sold').hidden = c.sold_price === null;
       $('estimated-value').value = c.estimated_value === null ? '' : money(c.estimated_value); $('sold-price').value = c.sold_price === null ? '' : money(c.sold_price);
-      $('sold-toggle').checked = c.sold_price !== null || (renderedVehicle === c.id && $('sold-toggle').checked);
+      $('sold-toggle').checked = c.sold_price !== null || pendingSold;
       $('sold-price').disabled = !$('sold-toggle').checked;
       renderExpenses(c); renderTotals(c); renderedVehicle = c.id;
     }
@@ -258,6 +272,7 @@
   async function operation(action, onSuccess, message = 'Saving…', savedForm = null) {
     if (busy || !user || !loaded) return false;
     const version = epoch;
+    mutationVersion++;
     const drafts = draftsExcept(savedForm);
     const valueSnapshot = valueSaving ? [...$('value-form').querySelectorAll('input')].map(input => [input.value,input.checked]) : null;
     let focusAfterSave = null;
@@ -278,6 +293,7 @@
         const unchanged = [...$('value-form').querySelectorAll('input')].every((input,i) => input.value === valueSnapshot[i][0] && input.checked === valueSnapshot[i][1]);
         if (unchanged) {delete $('value-form').dataset.dirty; for (const id of ['estimated-value','sold-price']) if ($(id) !== document.activeElement) formatInput($(id));}
         dirty = !!document.querySelector('#ledger form[data-dirty]');
+        $('vehicle-sold').hidden = current()?.sold_price === null;
         previewValues();
       } else {dirty = false; render(); restoreDrafts(drafts);}
       if (savedForm?.dataset.expense) {
@@ -293,28 +309,65 @@
     } finally { if (version === epoch) {lock(false); focusAfterSave?.focus({preventScroll:true}); if (valueQueued && !valueSaving) queueValues();} }
   }
   async function saveCar(c, changes, savedForm = null) {
-    return operation(() => client.from('vehicles').update({...changes,revision:c.revision + 1}).eq('id',c.id).eq('revision',c.revision).select().single(), data => {
+    return operation(async () => {
+      let result;
+      try {result = await client.from('vehicles').update({...changes,revision:c.revision + 1}).eq('id',c.id).eq('revision',c.revision).select().single();}
+      catch (error) {result = {error};}
+      // A response can be lost after the database commits. Confirm the exact
+      // intended record before reporting success; never retry a blind append.
+      if (result.error) {
+        try {
+          const latest = await client.from('vehicles').select('*').eq('id',c.id).single();
+          if (!latest.error && latest.data.revision >= c.revision + 1 && Object.entries(changes).every(([key,value]) => (key === 'valuation_updated_at' && value !== null ? new Date(latest.data[key]).getTime() === new Date(value).getTime() : sameData(latest.data[key],value)))) return latest;
+        } catch (_) { /* Keep the original error and all drafts. */ }
+      }
+      return result;
+    }, data => {
       cars[cars.findIndex(item => item.id === c.id)] = data;
     }, 'Saving…', savedForm);
   }
+  function syncBlocked() {
+    return busy || dirty || recovery || $('vehicle-dialog').open || !!document.querySelector('#ledger input:focus');
+  }
   async function load(silent = false, resolveSaveError = false) {
-    if (!user || busy || (silent && (dirty || $('vehicle-dialog').open || document.querySelector('#ledger input:focus')))) return;
-    const version = epoch;
-    lock(true); if (!silent) status('Loading…',false,{scope:'load'});
+    if (!user || busy || (silent && (syncRequest || syncBlocked()))) return;
+    if (!silent) mutationVersion++;
+    const version = epoch, mutation = mutationVersion;
+    const request = {};
+    if (silent) syncRequest = request;
+    else {lock(true); status('Loading…',false,{scope:'load'});}
     try {
-      const {data,error} = await client.from('vehicles').select('*').order('created_at');
-      if (error) throw error; if (version !== epoch) return;
-      cars = data; loaded = true; dirty = false; restoreDrafts([]); $('add-expense-form').reset(); render();
-      $('ledger').hidden = recovery;
+      const {data,error} = await client.from('vehicles').select('*').order('created_at').order('id');
+      if (version !== epoch || (silent && (mutation !== mutationVersion || syncBlocked()))) return;
+      if (error) throw error;
+      const unchanged = sameData(cars,data);
+      const previous = current();
+      const detailChanged = selectedId && !sameData(previous,data.find(c => c.id === selectedId));
+      cars = data; loaded = true;
+      if (!silent) {
+        dirty = false; restoreDrafts([]); $('add-expense-form').reset(); render();
+        $('ledger').hidden = recovery;
+      } else if (!unchanged && (!selectedId || detailChanged)) {
+        // Static navigation controls stay in place. No loading lock, animation
+        // restart, or DOM replacement occurs for an unchanged snapshot.
+        const focus = document.activeElement;
+        const x = scrollX, y = scrollY;
+        render();
+        if (focus?.isConnected && document.activeElement !== focus) focus.focus({preventScroll:true});
+        window.scrollTo(x,y);
+      }
       if (resolveSaveError) clearStatus();
       else if (!silent || (notice.kind === 'error' && notice.scope === 'load')) status('',false,{scope:'load',resolve:true});
     } catch (err) { if (version === epoch) {status('Could not load vehicles: ' + err.message, true,{scope:'load'}); $('retry').hidden = false;} }
-    finally { if (version === epoch) lock(false); }
+    finally {
+      if (silent) {if (syncRequest === request) syncRequest = null;}
+      else if (version === epoch) lock(false);
+    }
   }
   async function sessionChanged(session) {
     if (session?.user?.id === user?.id) return;
     clearTimeout(valueTimer); valueQueued = false; valueConflict = false;
-    expenseEditing = false; renderedVehicle = null;
+    expenseEditing = false; renderedVehicle = null; syncRequest = null;
     epoch++; user = session?.user || null; cars = []; selectedId = null; loaded = false; dirty = false; renderedPage = null; clearStatus();
     cancelDecode(); dialogToken++; vinSubmitting = false; $('vehicle-dialog').classList.remove('closing'); $('vehicle-dialog').close(); $('ledger').hidden = true; $('retry').hidden = true; $('logout').hidden = !user;
     restoreDrafts([]); $('add-expense-form').reset(); lock(false);
@@ -545,7 +598,7 @@
   };
   $('add-expense-form').addEventListener('input',setDirty);
   $('add-expense-form').onsubmit = async e => {
-    e.preventDefault(); const c = current(); if (!c) return;
+    e.preventDefault(); const c = current(); if (busy || !c) return;
     try {
       const description = $('expense-description').value.trim(); if (!description) return;
       const value = amount($('expense-amount').value); if (value === null) return;

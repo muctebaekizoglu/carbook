@@ -219,6 +219,11 @@ dialog[open].closing::backdrop { animation: fade-out 160ms var(--ease) both; }
 .expense-row:first-child { border-top: 0; }
 .expense-row > :first-child { min-width: 0; overflow-wrap: anywhere; }
 .expense-value { flex-shrink: 0; text-align: right; font-variant-numeric: tabular-nums; }
-[data-result="positive"] strong { color: #405C4D; }
-[data-result="negative"] strong { color: #994b43; }
+[data-result="positive"] strong { color: #087F46; font-weight: 600; }
+[data-result="negative"] strong { color: #B42318; }
 [data-result="neutral"] strong { color: #252925; }
+
+.vehicle-name { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.card-profit-labels { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+.card-profit { align-items: flex-end; }
+.sold-badge, .card-profit .sold-badge { display: inline-block; width: max-content; color: #fff; background: #B42318; border-radius: 4px; padding: 2px 6px; font-size: 9px; font-weight: 650; line-height: 1.5; letter-spacing: .55px; }
