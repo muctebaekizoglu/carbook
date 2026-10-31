@@ -17,3 +17,14 @@ test('profit is unknown until valued; sale price including zero controls actual 
 test('many fractional expenses retain exact cents', () => {
   assert.equal(totals({expenses:Array.from({length:10000},()=>({amount:.01})),estimated_value:100.01,sold_price:null}).profit,.01);
 });
+test('currency parsing accepts US paste formats and rejects ambiguous or partial input',()=>{
+  for (const value of ['11170','11,170','$11,170','11,170.00',' $11,170.00 ']) assert.equal(amount(value),11170);
+  for (const value of ['11,17','1,11,170','11.170,00','$','1.','1 170','$$100','1,000.001','-10','12abc']) assert.throws(()=>amount(value));
+  assert.equal(amount('$40.70'),40.7);assert.equal(amount('15.88'),15.88);
+});
+test('currency formatting preserves cents and omits whole-dollar decimals',()=>{
+  const {format}=require('../finance.js');
+  for (const [value,result] of [[11170,'$11,170'],[9610,'$9,610'],[40.7,'$40.70'],[15.88,'$15.88'],[0,'$0'],[-40.7,'-$40.70'],[null,'—']]) assert.equal(format(value),result);
+  assert.equal(format(11170,false),'11,170');
+  for (let cents=0;cents<10000;cents++) assert.equal(amount(format(cents/100)),cents/100);
+});

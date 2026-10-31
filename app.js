@@ -2,11 +2,16 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  const {amount, totals} = window.CarbookFinance;
+  const {amount, totals, format} = window.CarbookFinance;
   const VIN = window.CarbookVIN;
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const authForms = {login:'auth-form', signup:'signup-form', reset:'reset-form', update:'update-form'};
-  const money = value => value === null ? '—' : new Intl.NumberFormat('en-US', {style:'currency',currency:'USD',minimumFractionDigits:2,maximumFractionDigits:2}).format(value);
+  const money = value => format(value);
+  const profitState = value => value === null || value === 0 ? 'neutral' : value > 0 ? 'positive' : 'negative';
+  let expenseEditing = false;
+  function formatInput(input) {
+    try {const value = amount(input.value); input.value = value === null ? '' : format(value, !input.closest('.money-input'));} catch (_) { /* Leave incomplete input intact. */ }
+  }
   const config = window.CARBOOK_CONFIG || {};
   const configured = /^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(config.supabaseUrl || '') && !!config.supabasePublishableKey && !/^(sb_secret_|ey.*service_role)/.test(config.supabasePublishableKey);
   let client, user = null, cars = [], selectedId = null, editingId = null;
@@ -86,7 +91,7 @@
     $('expense-total').textContent = money(t.invested);
     $('profit-label').textContent = t.sold ? 'Actual profit' : 'Potential profit';
     $('profit').textContent = money(t.profit);
-    $('profit').parentElement.dataset.loss = String(t.profit !== null && t.profit < 0);
+    $('profit').parentElement.dataset.result = profitState(t.profit);
   }
   // Query-string routing keeps direct links compatible with static hosting and
   // leaves the URL fragment available for Supabase email/recovery callbacks.
@@ -106,6 +111,7 @@
   }
   function discardDrafts() {
     clearTimeout(valueTimer); valueQueued = false; valueConflict = false;
+    expenseEditing = false;
     dirty = false; restoreDrafts([]); $('add-expense-form').reset();
     cancelDecode(); dialogToken++; vinSubmitting = false;
     $('vehicle-dialog').close(); $('vehicle-dialog').classList.remove('closing');
@@ -156,7 +162,7 @@
       if (c.vin) {const vin = document.createElement('p'); vin.className = 'vin'; vin.textContent = c.vin; link.append(vin);}
       const total = totals(c);
       if (total.profit !== null) {
-        const summary = document.createElement('div'); summary.className = 'card-profit'; summary.dataset.loss = String(total.profit < 0);
+        const summary = document.createElement('div'); summary.className = 'card-profit'; summary.dataset.result = profitState(total.profit);
         const label = document.createElement('span'); label.textContent = total.sold ? 'Actual profit' : 'Potential profit';
         const value = document.createElement('strong'); value.textContent = money(total.profit);
         summary.append(label,value); link.append(summary);
@@ -179,8 +185,8 @@
     } else {
       document.title = c.name + ' · Carbook';
       $('vehicle-title').textContent = c.name; $('vehicle-vin').textContent = c.vin || ''; $('vehicle-vin').hidden = !c.vin;
-      $('estimated-value').value = c.estimated_value ?? ''; $('sold-price').value = c.sold_price ?? '';
-      $('sold-toggle').checked = c.sold_price !== null;
+      $('estimated-value').value = c.estimated_value === null ? '' : money(c.estimated_value); $('sold-price').value = c.sold_price === null ? '' : money(c.sold_price);
+      $('sold-toggle').checked = c.sold_price !== null || (renderedVehicle === c.id && $('sold-toggle').checked);
       $('sold-price').disabled = !$('sold-toggle').checked;
       renderExpenses(c); renderTotals(c); renderedVehicle = c.id;
     }
@@ -188,14 +194,24 @@
     renderedPage = page;
   }
   function renderExpenses(c) {
+    $('edit-expenses').textContent = expenseEditing ? 'Done' : 'Edit';
+    $('cancel-expenses').hidden = !expenseEditing;
     const list = $('expense-list');
     const previous = new Set([...list.children].map(row => row.dataset.expense));
     list.replaceChildren();
     for (const exp of c.expenses) {
+      if (!expenseEditing) {
+        const row = document.createElement('div'); row.className = 'expense-row'; row.dataset.expense = exp.id;
+        const description = document.createElement('span'); description.textContent = exp.description;
+        const value = document.createElement('span'); value.className = 'expense-value'; value.textContent = money(exp.amount);
+        row.append(description,value); list.append(row);
+        if (renderedVehicle === c.id && !previous.has(exp.id)) motion(row,[{opacity:0},{opacity:1}]);
+        continue;
+      }
       const row = document.createElement('form'); row.className = 'expense-line'; row.dataset.expense = exp.id;
       const description = document.createElement('input'); description.name = 'description'; description.type = 'text'; description.value = exp.description;
       description.maxLength = 100; description.required = true; description.setAttribute('aria-label','Expense description');
-      const value = document.createElement('input'); value.name = 'amount'; value.type = 'number'; value.inputMode = 'decimal'; value.step = '.01'; value.min = '0'; value.max = '100000000'; value.required = true; value.value = Number(exp.amount).toFixed(2); value.setAttribute('aria-label','Expense amount');
+      const value = document.createElement('input'); value.name = 'amount'; value.type = 'text'; value.inputMode = 'decimal'; value.step = '.01'; value.min = '0'; value.max = '100000000'; value.required = true; value.value = format(exp.amount,false); value.setAttribute('aria-label','Expense amount');
       const actions = document.createElement('div'); actions.className = 'expense-actions';
       const save = document.createElement('button'); save.type = 'submit'; save.textContent = 'Save'; save.setAttribute('aria-label',`Save ${exp.description}`);
       const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Remove'; remove.setAttribute('aria-label',`Remove ${exp.description}`);
@@ -205,6 +221,7 @@
         c = current();
         const text = description.value.trim(); if (!text) return description.reportValidity();
         try {
+          if (amount(value.value) === null) throw Error('Enter an expense amount.');
           const updated = c.expenses.map(item => item.id === exp.id ? {...item,description:text,amount:amount(value.value)} : item);
           saveCar(c, {expenses:updated}, row);
         } catch (err) { status(err.message, true); }
@@ -259,7 +276,7 @@
       onSuccess(result.data);
       if (valueSnapshot) {
         const unchanged = [...$('value-form').querySelectorAll('input')].every((input,i) => input.value === valueSnapshot[i][0] && input.checked === valueSnapshot[i][1]);
-        if (unchanged) delete $('value-form').dataset.dirty;
+        if (unchanged) {delete $('value-form').dataset.dirty; for (const id of ['estimated-value','sold-price']) if ($(id) !== document.activeElement) formatInput($(id));}
         dirty = !!document.querySelector('#ledger form[data-dirty]');
         previewValues();
       } else {dirty = false; render(); restoreDrafts(drafts);}
@@ -297,6 +314,7 @@
   async function sessionChanged(session) {
     if (session?.user?.id === user?.id) return;
     clearTimeout(valueTimer); valueQueued = false; valueConflict = false;
+    expenseEditing = false; renderedVehicle = null;
     epoch++; user = session?.user || null; cars = []; selectedId = null; loaded = false; dirty = false; renderedPage = null; clearStatus();
     cancelDecode(); dialogToken++; vinSubmitting = false; $('vehicle-dialog').classList.remove('closing'); $('vehicle-dialog').close(); $('ledger').hidden = true; $('retry').hidden = true; $('logout').hidden = !user;
     restoreDrafts([]); $('add-expense-form').reset(); lock(false);
@@ -503,6 +521,28 @@
     const ok = await operation(() => client.from('vehicles').delete().eq('id',c.id).eq('revision',c.revision).select().single(), () => {cars = cars.filter(v => v.id !== c.id); setRoute(null,true);});
     if (ok) closeForm();
   };
+  $('edit-expenses').onclick = async () => {
+    if (busy || !current()) return;
+    if (!expenseEditing) {expenseEditing = true; renderExpenses(current()); $('expense-list').querySelector('input')?.focus(); return;}
+    while ($('expense-list').querySelector('form[data-dirty]')) {
+      const row = $('expense-list').querySelector('form[data-dirty]');
+      const description = row.elements.description.value.trim();
+      if (!description) {row.elements.description.reportValidity(); return;}
+      try {
+        const value = amount(row.elements.amount.value);
+        if (value === null) throw Error('Enter an expense amount.');
+        const c = current();
+        if (!await saveCar(c,{expenses:c.expenses.map(exp => exp.id === row.dataset.expense ? {...exp,description,amount:value} : exp)},row)) return;
+      } catch (err) {status(err.message,true); return;}
+    }
+    expenseEditing = false; renderExpenses(current()); $('edit-expenses').focus();
+  };
+  $('cancel-expenses').onclick = () => {
+    if (busy) return;
+    if ($('expense-list').querySelector('form[data-dirty]') && !confirm('Discard unsaved expense edits?')) return;
+    const drafts = draftsExcept(null).filter(draft => !draft.expense);
+    expenseEditing = false; renderExpenses(current()); restoreDrafts(drafts); $('edit-expenses').focus();
+  };
   $('add-expense-form').addEventListener('input',setDirty);
   $('add-expense-form').onsubmit = async e => {
     e.preventDefault(); const c = current(); if (!c) return;
@@ -518,10 +558,10 @@
   function valueChanges(c) {
     const estimated_value = amount($('estimated-value').value);
     const sold_price = $('sold-toggle').checked ? amount($('sold-price').value) : null;
-    if ($('sold-toggle').checked && sold_price === null) throw Error('Enter a sold price or turn Sold off.');
+
     const changes = {};
     if (estimated_value !== c.estimated_value) Object.assign(changes,{estimated_value,valuation_source:estimated_value === null ? null : 'Manual',valuation_updated_at:estimated_value === null ? null : new Date().toISOString()});
-    if (sold_price !== c.sold_price) changes.sold_price = sold_price;
+    if ((!$('sold-toggle').checked || sold_price !== null) && sold_price !== c.sold_price) changes.sold_price = sold_price;
     return changes;
   }
   function queueValues() {
@@ -554,22 +594,27 @@
     clearTimeout(valueTimer); valueQueued = false;
     setDirty(); previewValues();
   };
+  $('ledger').addEventListener('focusout', e => {
+    if (e.target.matches('input[name=amount], #estimated-value, #sold-price')) formatInput(e.target);
+  }, true);
   $('value-form').addEventListener('focusout', e => {
     if (e.target.id !== 'sold-toggle' && (!busy || valueSaving) && $('value-form').dataset.dirty) queueValues();
   });
   $('sold-toggle').onchange = () => {
     const toggle = $('sold-toggle');
-    if (!toggle.checked && ($('sold-price').value.trim() || current()?.sold_price !== null)) {
+    if (!toggle.checked && current()?.sold_price !== null) {
       if (!confirm('Clear the recorded sold price?')) {toggle.checked = true; return;}
       $('sold-price').value = '';
     }
+    if (!toggle.checked) $('sold-price').value = '';
     $('sold-price').disabled = !toggle.checked;
-    $('value-form').dataset.dirty = 'true'; setDirty(); previewValues();
+    if (!toggle.checked || $('sold-price').value.trim()) {$('value-form').dataset.dirty = 'true'; setDirty();}
+    previewValues();
     if (toggle.checked) $('sold-price').focus(); else queueValues();
   };
   $('ledger').addEventListener('input', e => {const form = e.target.closest('form'); if (form && e.target.id !== 'sold-toggle') form.dataset.dirty = 'true';});
   $('value-form').addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.isComposing) {e.preventDefault(); if (busy) valueQueued = true; else flushValues();}
+    if (e.key === 'Enter' && !e.isComposing) {e.preventDefault(); if (busy) valueQueued = true; else {formatInput(e.target); flushValues();}}
   });
   $('value-form').onsubmit = e => {e.preventDefault(); flushValues();};
   $('check-carfax').onclick = () => {

@@ -57,11 +57,11 @@
         <div class="page-head"><div><h1 id="vehicle-title" tabindex="-1"></h1><p id="vehicle-vin" class="vin"></p></div><button id="edit-vehicle" class="text-button" aria-label="Edit vehicle">Edit</button></div>
         <div class="details-grid">
           <section class="expenses" aria-labelledby="expenses-heading">
-            <h2 id="expenses-heading">Expenses</h2>
+            <div class="expenses-heading"><h2 id="expenses-heading">Expenses</h2><div><button id="cancel-expenses" class="text-button" type="button" hidden>Cancel</button><button id="edit-expenses" class="text-button" type="button">Edit</button></div></div>
             <div id="expense-list"></div>
             <form id="add-expense-form" class="expense-line">
               <input id="expense-description" name="description" type="text" aria-label="New expense description" maxlength="100" required>
-              <span class="money-input"><span aria-hidden="true">$</span><input id="expense-amount" name="amount" aria-label="New expense amount in dollars" type="number" inputmode="decimal" step="0.01" min="0" max="100000000" required></span>
+              <span class="money-input"><span aria-hidden="true">$</span><input id="expense-amount" name="amount" aria-label="New expense amount in dollars" type="text" inputmode="decimal" autocomplete="off" required></span>
               <button type="submit">Add</button>
             </form>
             <div class="total"><span>Total invested</span><strong id="expense-total"></strong></div>
