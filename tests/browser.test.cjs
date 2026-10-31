@@ -18,6 +18,7 @@ test('browser flows with mocked Supabase, desktop and mobile', async () => {
   try {
     browser = await chromium.launch({headless:true,...(process.env.CHROME_EXECUTABLE?{executablePath:process.env.CHROME_EXECUTABLE}:{})});
     const page=await browser.newPage({viewport:{width:1280,height:900}});
+    page.on('dialog',dialog=>dialog.accept());
     const errors=[];page.on('pageerror',err=>errors.push(err.message));
     const url=`http://127.0.0.1:${server.address().port}/`;
     // Tests must never use a checkout's real cloud configuration.
@@ -38,26 +39,26 @@ test('browser flows with mocked Supabase, desktop and mobile', async () => {
     const addExpense=async(description,value)=>{await page.locator('#expense-description').fill(description);await page.locator('#expense-amount').fill(value);await page.locator('#add-expense-form button').click();await page.locator('#expense-list input').first().waitFor();await page.waitForFunction(text=>[...document.querySelectorAll('#expense-list input')].some(input=>input.value===text),description);};
     await addExpense('Purchase','10000');await addExpense('Repair','250.25');
     assert.equal(await page.locator('#expense-total').textContent(),'$10,250.25');assert.equal(await page.locator('#profit').textContent(),'—');
-    await page.locator('#estimated-value').fill('12000');await page.locator('#value-form button').click();await page.getByText('Manual ·',{exact:false}).waitFor();assert.equal(await page.locator('#profit').textContent(),'$1,749.75');
-    await page.locator('#sold-price').fill('12500');await page.locator('#value-form button').click();await page.locator('#profit-label').getByText('Actual profit',{exact:true}).waitFor();assert.equal(await page.locator('#profit').textContent(),'$2,249.75');
+    await page.locator('#estimated-value').fill('12000');await page.locator('#value-form').evaluate(el=>el.requestSubmit());await page.getByText('Saved',{exact:true}).waitFor();assert.equal(await page.locator('#profit').textContent(),'$1,749.75');
+    await page.locator('#sold-toggle').check();await page.locator('#sold-price').fill('12500');await page.locator('#value-form').evaluate(el=>el.requestSubmit());await page.locator('#profit-label').getByText('Actual profit',{exact:true}).waitFor();assert.equal(await page.locator('#profit').textContent(),'$2,249.75');
     // Saving one form must retain drafts in other forms.
     await page.locator('#estimated-value').fill('13000');
     const repair=page.locator('#expense-list form').nth(1);await repair.locator('input[type=number]').fill('200');await repair.getByRole('button',{name:'Save Repair',exact:true}).click();
-    assert.equal(await page.locator('#estimated-value').inputValue(),'13000');assert.equal(await page.locator('#value-dirty').isVisible(),true);
-    await page.locator('#sold-price').fill('');await page.locator('#value-form button').click();await page.locator('#profit-label').getByText('Potential profit',{exact:true}).waitFor();assert.equal(await page.locator('#profit').textContent(),'$2,800.00');
+    assert.equal(await page.locator('#estimated-value').inputValue(),'13000');
+    await page.locator('#sold-toggle').uncheck();await page.locator('#profit-label').getByText('Potential profit',{exact:true}).waitFor();assert.equal(await page.locator('#profit').textContent(),'$2,800.00');
     await page.reload();await page.locator('#vehicle-view').waitFor({state:'visible'});assert.equal(await page.locator('#estimated-value').inputValue(),'13000');
     // Failed saves leave drafts and never change the persisted record.
     await page.evaluate(()=>localStorage.setItem('test.fail','1'));
-    await page.locator('#sold-price').fill('14000');await page.locator('#value-form button').click();await page.getByText('Network unavailable',{exact:false}).waitFor();assert.equal(await page.locator('#sold-price').inputValue(),'14000');
-    await page.evaluate(()=>localStorage.removeItem('test.fail'));await page.locator('#value-form button').click();await page.getByText('Saved',{exact:true}).waitFor();
+    await page.locator('#sold-toggle').check();await page.locator('#sold-price').fill('14000');await page.locator('#value-form').evaluate(el=>el.requestSubmit());await page.getByText('Network unavailable',{exact:false}).waitFor();assert.equal(await page.locator('#sold-price').inputValue(),'14000');
+    await page.evaluate(()=>localStorage.removeItem('test.fail'));await page.locator('#value-form').evaluate(el=>el.requestSubmit());await page.getByText('Saved',{exact:true}).waitFor();
     // Focus refresh picks up a remote change while idle.
     await page.locator('#sold-price').blur();
     await page.evaluate(()=>{const d=JSON.parse(localStorage.getItem('test.db'));d.vehicles[0].sold_price=14500;d.vehicles[0].revision++;localStorage.setItem('test.db',JSON.stringify(d));window.dispatchEvent(new Event('focus'));});
     await page.waitForFunction(()=>document.getElementById('sold-price').value==='14500');
     // Reject a stale revision and preserve its form contents.
     await page.evaluate(()=>{const d=JSON.parse(localStorage.getItem('test.db'));d.vehicles[0].revision++;localStorage.setItem('test.db',JSON.stringify(d));});
-    await page.locator('#sold-price').fill('15000');await page.locator('#value-form button').click();await page.getByText('This vehicle changed on another device.',{exact:false}).waitFor();assert.equal(await page.locator('#sold-price').inputValue(),'15000');
-    page.on('dialog',dialog=>dialog.accept());await page.reload();await page.locator('#vehicle-view').waitFor({state:'visible'});
+    await page.locator('#sold-price').fill('15000');await page.locator('#value-form').evaluate(el=>el.requestSubmit());await page.getByText('This vehicle changed on another device.',{exact:false}).waitFor();assert.equal(await page.locator('#sold-price').inputValue(),'15000');
+    await page.reload();await page.locator('#vehicle-view').waitFor({state:'visible'});
     await page.locator('#edit-vehicle').click();await page.locator('#manual-entry').click();await page.locator('#form-name').fill('BMW project');await page.locator('#vehicle-form button[type=submit]').click();await page.locator('#vehicle-title').getByText('BMW project').waitFor();await page.locator('#vehicle-dialog').waitFor({state:'hidden'});
     await page.getByRole('button',{name:'Remove Repair',exact:true}).click();await page.getByRole('button',{name:'Remove Repair',exact:true}).waitFor({state:'detached'});
     // Account separation in the mock (real RLS requires the SQL tests/live checks).

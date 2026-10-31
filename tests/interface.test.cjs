@@ -99,7 +99,7 @@ test('refined layouts, reduced motion, stable saving status, and safe vehicle ed
     const top=await page.locator('#vehicle-view').evaluate(el=>el.getBoundingClientRect().top);
     await page.locator('#estimated-value').fill('8600');
     assert.equal(await page.locator('#vehicle-view').evaluate(el=>el.getBoundingClientRect().top),top);
-    await page.locator('#value-form button').click();await page.locator('#status').getByText('Saved',{exact:true}).waitFor();
+    await page.locator('#estimated-value').blur();await page.locator('#status').getByText('Saved',{exact:true}).waitFor();
     assert.equal(await page.locator('#vehicle-view').evaluate(el=>el.getBoundingClientRect().top),top);
     await page.locator('#edit-vehicle').click();assert.equal(requests,0);
     await page.locator('#manual-entry').click();await page.locator('#form-name').fill('2003 Honda Accord EX');await page.locator('#save-vehicle').click();
@@ -109,7 +109,7 @@ test('refined layouts, reduced motion, stable saving status, and safe vehicle ed
     for (const width of [760,390,360,320]) {
       await page.setViewportSize({width,height:850});
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`no overflow at ${width}`);
-      const amount=await page.locator('#expense-amount').boundingBox();assert.ok(amount.width>=85);
+      const amount=await page.locator('#add-expense-form .money-input').boundingBox();assert.ok(amount.width>=85);
       await page.locator('#edit-vehicle').click();
       assert.equal(await page.locator('#vehicle-dialog').evaluate(el=>el.scrollWidth<=el.clientWidth),true,`modal does not overflow at ${width}`);
       await page.locator('#cancel-dialog').click();await page.locator('#vehicle-dialog').waitFor({state:'hidden'});
@@ -210,7 +210,7 @@ test('unsaved browser navigation is reversible and active saves retain the corre
     await page.goForward();await page.locator('#vehicle-view').waitFor({state:'visible'});
     assert.equal(await page.locator('#estimated-value').inputValue(),'8500');
     await page.evaluate(()=>localStorage.setItem('test.saveDelay','450'));
-    await page.locator('#estimated-value').fill('8600');await page.locator('#value-form button').click();
+    await page.locator('#estimated-value').fill('8600');await page.locator('#estimated-value').blur();
     await page.locator('#status').getByText('Saving…',{exact:true}).waitFor();
     await page.evaluate(()=>history.back());
     await page.waitForFunction(()=>new URL(location.href).searchParams.get('vehicle')==='test-car'&&history.state.carbookIndex===1);
@@ -230,7 +230,7 @@ test('save feedback waits for confirmation, expires without layout space, and pr
     const top=await page.locator('#vehicle-view').evaluate(el=>el.getBoundingClientRect().top);
     assert.equal(await page.locator('#status-bar').isVisible(),false);
     await page.evaluate(()=>localStorage.setItem('test.saveDelay','350'));
-    await page.locator('#estimated-value').fill('8600');await page.locator('#value-form button').click();
+    await page.locator('#estimated-value').fill('8600');await page.locator('#estimated-value').blur();
     await page.locator('#status').getByText('Saving…',{exact:true}).waitFor();
     assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].estimated_value),8500);
     await page.locator('#status').getByText('Saved',{exact:true}).waitFor();
@@ -242,7 +242,7 @@ test('save feedback waits for confirmation, expires without layout space, and pr
     assert.equal(await page.locator('#vehicle-view').evaluate(el=>el.getBoundingClientRect().top),top);
     assert.equal(await page.locator('#status-bar').evaluate(el=>el.getBoundingClientRect().height),0);
     await page.evaluate(()=>{localStorage.removeItem('test.saveDelay');localStorage.setItem('test.failSave','1');});
-    await page.locator('#estimated-value').fill('9000');await page.locator('#value-form button').click();
+    await page.locator('#estimated-value').fill('9000');await page.locator('#estimated-value').blur();
     await page.locator('#status').getByText('Network unavailable',{exact:true}).waitFor();
     await page.locator('#estimated-value').fill('9100');await page.locator('#estimated-value').blur();
     await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
@@ -250,7 +250,7 @@ test('save feedback waits for confirmation, expires without layout space, and pr
     assert.equal(await page.locator('#status').textContent(),'Network unavailable');
     assert.equal(await page.locator('#estimated-value').inputValue(),'9100');
     assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].estimated_value),8600);
-    await page.evaluate(()=>localStorage.removeItem('test.failSave'));await page.locator('#value-form button').click();
+    await page.evaluate(()=>localStorage.removeItem('test.failSave'));await page.locator('#retry').click();
     await page.locator('#status').getByText('Saved',{exact:true}).waitFor();
     await page.reload();await page.locator('#vehicle-view').waitFor({state:'visible'});
     assert.equal(await page.locator('#status-bar').isVisible(),false);
@@ -269,6 +269,76 @@ test('a direct vehicle link survives login without touching browser-local record
     assert.equal(await page.locator('#import-prompt').count(),0);
     assert.equal(await page.evaluate(()=>localStorage.getItem('carbook.records.v2')),legacy);
     assert.equal(await page.evaluate(()=>window.testCloudCalls.every(call=>call.type==='select'&&call.table==='vehicles')),true);
+    assert.deepEqual(env.errors,[]);
+  } finally {await env.close();}
+});
+
+test('value autosaving validates complete amounts, retries safely, and preserves sold information', async()=>{
+  const env=await app({records:[fixture],route:'?vehicle=test-car'});const {page}=env;
+  const stored=()=>page.evaluate(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0]);
+  const settled=()=>page.waitForFunction(()=>document.getElementById('ledger').getAttribute('aria-busy')==='false');
+  try {
+    assert.equal(await page.locator('#value-form button, #value-source, #value-dirty').count(),0);
+    assert.equal(await page.locator('#check-carfax').textContent(),'CARFAX Value');
+    assert.equal(await page.locator('#sold-price').isDisabled(),true);
+    assert.equal(await page.locator('#expense-description').getAttribute('placeholder'),null);
+    assert.equal(await page.locator('#expense-amount').evaluate(el=>getComputedStyle(el).textAlign),'left');
+    for (const value of ['12.','.','-','1.234']) {
+      await page.locator('#estimated-value').fill(value);await page.locator('#estimated-value').blur();
+      await page.locator('#status.error').waitFor();assert.equal((await stored()).estimated_value,8500);
+    }
+    await page.locator('#estimated-value').fill('9200');await page.waitForTimeout(400);
+    assert.equal((await stored()).estimated_value,8500,'typing does not save before blur');
+    await page.locator('#estimated-value').blur();
+    await page.waitForFunction(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].estimated_value===9200);await settled();
+    assert.equal((await stored()).valuation_source,'Manual');assert.notEqual((await stored()).valuation_updated_at,fixture.valuation_updated_at);
+    await page.locator('#sold-toggle').check();await page.locator('#sold-price').blur();
+    await page.locator('#status').getByText('Enter a sold price or turn Sold off.').waitFor();
+    assert.equal((await stored()).sold_price,null);
+    await page.locator('#sold-price').fill('0');await page.locator('#sold-price').blur();
+    await page.waitForFunction(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].sold_price===0);await settled();
+    await page.reload();await page.locator('#vehicle-view').waitFor();
+    assert.equal(await page.locator('#sold-toggle').isChecked(),true);assert.equal(await page.locator('#profit-label').textContent(),'Actual profit');
+    page.removeAllListeners('dialog');page.once('dialog',dialog=>dialog.dismiss());
+    await page.locator('#sold-toggle').click();assert.equal(await page.locator('#sold-toggle').isChecked(),true);assert.equal((await stored()).sold_price,0);
+    page.on('dialog',dialog=>dialog.accept());await page.locator('#sold-toggle').uncheck();
+    await page.waitForFunction(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].sold_price===null);await settled();
+    assert.equal(await page.locator('#sold-price').isDisabled(),true);
+    // Conflicts retain the edited value and merge only that field after explicit approval.
+    await page.evaluate(()=>{const db=JSON.parse(localStorage.getItem('test.db'));db.vehicles[0].revision++;db.vehicles[0].sold_price=10000;db.vehicles[0].expenses.push({id:'remote',description:'Remote repair',amount:50});localStorage.setItem('test.db',JSON.stringify(db));});
+    await page.locator('#estimated-value').fill('9400');await page.locator('#estimated-value').blur();
+    await page.locator('#status').getByText('This vehicle changed',{exact:false}).waitFor();
+    assert.equal(await page.locator('#estimated-value').inputValue(),'9400');
+    await page.locator('#retry').click();await page.waitForFunction(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].estimated_value===9400);await settled();
+    assert.equal((await stored()).sold_price,10000);assert.equal((await stored()).expenses.at(-1).description,'Remote repair');
+    // A completed pending value saves before internal navigation, then survives reload.
+    await page.locator('#estimated-value').fill('9450');await page.locator('#estimated-value').press('Enter');
+    await page.waitForFunction(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].estimated_value===9450);await settled();
+    await page.locator('#estimated-value').fill('9500');await page.locator('#back-garage').click();await page.locator('#garage').waitFor();
+    assert.equal((await stored()).estimated_value,9500);
+    await page.locator('.vehicle-card').click();await page.reload();await page.locator('#vehicle-view').waitFor();
+    assert.equal(await page.locator('#estimated-value').inputValue(),'9500');assert.equal(await page.locator('#sold-price').inputValue(),'10000');
+    assert.deepEqual(env.errors,[]);
+  } finally {await env.close();}
+});
+
+test('in-flight value saves preserve newer typing and expense drafts', async()=>{
+  const env=await app({records:[fixture],route:'?vehicle=test-car'});const {page}=env;
+  try {
+    await page.evaluate(()=>localStorage.setItem('test.saveDelay','450'));
+    await page.locator('#estimated-value').fill('9000');await page.locator('#estimated-value').blur();
+    await page.locator('#status').getByText('Saving…',{exact:true}).waitFor();
+    await page.locator('#estimated-value').fill('9100');await page.locator('#estimated-value').blur();
+    await page.locator('#expense-description').fill('New repair');await page.locator('#expense-amount').fill('24.50');
+    await page.waitForFunction(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].estimated_value===9100);
+    await page.waitForFunction(()=>document.getElementById('ledger').getAttribute('aria-busy')==='false');
+    assert.equal(await page.locator('#expense-description').inputValue(),'New repair');
+    assert.equal(await page.locator('#expense-amount').inputValue(),'24.50');
+    await page.locator('#add-expense-form button').click();
+    await page.waitForFunction(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].expenses.length===5);
+    await page.reload();await page.locator('#vehicle-view').waitFor();
+    assert.equal(await page.locator('#estimated-value').inputValue(),'9100');
+    assert.equal(await page.locator('#expense-total').textContent(),'$7,224.00');
     assert.deepEqual(env.errors,[]);
   } finally {await env.close();}
 });

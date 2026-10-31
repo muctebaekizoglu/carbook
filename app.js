@@ -11,6 +11,8 @@
   const configured = /^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(config.supabaseUrl || '') && !!config.supabasePublishableKey && !/^(sb_secret_|ey.*service_role)/.test(config.supabasePublishableKey);
   let client, user = null, cars = [], selectedId = null, editingId = null;
   let busy = false, dirty = false, loaded = false, epoch = 0, authMode = 'login', recovery = false;
+  let valueTimer, valueQueued = false, valueSaving = false, valueConflict = false;
+  let valueTask = null;
   let notice = {kind:'', scope:''}, noticeTimer, fadeTimer;
   let navigationIndex = Number.isInteger(history.state?.carbookIndex) ? history.state.carbookIndex : 0;
   let restoringHistory = false, renderedPage = null;
@@ -54,9 +56,10 @@
       // Keep credentials in native form controls during submission so managers
       // can observe them. Readonly prevents edits without disabling autofill fields.
       if (el.matches('#auth input')) el.readOnly = value || el.id === 'update-email';
-      else el.disabled = value;
+      else el.disabled = value && !(valueSaving && el.matches('#ledger input'));
     });
     $('ledger').setAttribute('aria-busy', String(value));
+    $('sold-price').disabled = (value && !valueSaving) || !$('sold-toggle').checked;
     updateVinButton();
   }
   function unsaved() { return !dirty || confirm('Discard unsaved changes?'); }
@@ -102,6 +105,7 @@
     routeUrl = url; selectedId = id;
   }
   function discardDrafts() {
+    clearTimeout(valueTimer); valueQueued = false; valueConflict = false;
     dirty = false; restoreDrafts([]); $('add-expense-form').reset();
     cancelDecode(); dialogToken++; vinSubmitting = false;
     $('vehicle-dialog').close(); $('vehicle-dialog').classList.remove('closing');
@@ -111,8 +115,11 @@
     const target = selectedId ? current() ? $('vehicle-title') : $('vehicle-missing') : $('garage-title');
     target.focus({preventScroll:true}); window.scrollTo({top:0,behavior:'instant'});
   }
-  function navigate(id) {
-    if (busy || !unsaved()) return;
+  async function navigate(id) {
+    if (valueTask) await valueTask;
+    if (busy) return;
+    if ($('value-form').dataset.dirty && !await flushValues()) return;
+    if (!unsaved()) return;
     discardDrafts(); setRoute(id);
     if (loaded) {render(); focusPage();}
   }
@@ -173,9 +180,9 @@
       document.title = c.name + ' · Carbook';
       $('vehicle-title').textContent = c.name; $('vehicle-vin').textContent = c.vin || ''; $('vehicle-vin').hidden = !c.vin;
       $('estimated-value').value = c.estimated_value ?? ''; $('sold-price').value = c.sold_price ?? '';
-      const date = c.valuation_updated_at ? new Date(c.valuation_updated_at) : null;
-      $('value-source').textContent = c.estimated_value === null ? '' : `${c.valuation_source || 'Manual'}${date && Number.isFinite(date.getTime()) ? ' · ' + date.toLocaleDateString('en-US', {month:'short',day:'numeric',year:'numeric'}) : ''}`;
-      $('value-dirty').hidden = true; renderExpenses(c); renderTotals(c); renderedVehicle = c.id;
+      $('sold-toggle').checked = c.sold_price !== null;
+      $('sold-price').disabled = !$('sold-toggle').checked;
+      renderExpenses(c); renderTotals(c); renderedVehicle = c.id;
     }
     if (renderedPage !== page) motion(selectedId ? $('detail-page') : $('garage'), [{opacity:.5,transform:'translateY(4px)'},{opacity:1,transform:'translateY(0)'}],220);
     renderedPage = page;
@@ -195,6 +202,7 @@
       row.addEventListener('input', setDirty);
       row.addEventListener('submit', e => {
         e.preventDefault();
+        c = current();
         const text = description.value.trim(); if (!text) return description.reportValidity();
         try {
           const updated = c.expenses.map(item => item.id === exp.id ? {...item,description:text,amount:amount(value.value)} : item);
@@ -202,16 +210,20 @@
         } catch (err) { status(err.message, true); }
       });
       remove.addEventListener('click', () => {
+        c = current();
         if (confirm(`Remove ${exp.description}?`)) saveCar(c, {expenses:c.expenses.filter(item => item.id !== exp.id)}, row);
       });
-      actions.append(save,remove); row.append(description,value,actions); list.append(row);
+      const field = document.createElement('span'); field.className = 'money-input';
+      const prefix = document.createElement('span'); prefix.textContent = '$'; prefix.setAttribute('aria-hidden','true');
+      field.append(prefix,value);
+      actions.append(save,remove); row.append(description,field,actions); list.append(row);
       if (renderedVehicle === c.id && !previous.has(exp.id)) motion(row, [{opacity:0,transform:'translateY(-4px)'},{opacity:1,transform:'translateY(0)'}], 220);
     }
   }
   function draftsExcept(savedForm) {
     return [...document.querySelectorAll('#ledger form[data-dirty]')].filter(form => form !== savedForm).map(form => ({
       id:form.id, expense:form.dataset.expense,
-      values:[...form.querySelectorAll('input')].map(input => input.value)
+      values:[...form.querySelectorAll('input')].map(input => ({value:input.value,checked:input.checked}))
     }));
   }
   function restoreDrafts(drafts) {
@@ -219,16 +231,18 @@
     for (const draft of drafts) {
       const form = draft.id ? $(draft.id) : [...document.querySelectorAll('[data-expense]')].find(el => el.dataset.expense === draft.expense);
       if (!form) continue;
-      [...form.querySelectorAll('input')].forEach((input,i) => input.value = draft.values[i]);
+      [...form.querySelectorAll('input')].forEach((input,i) => {input.value = draft.values[i].value; input.checked = draft.values[i].checked;});
       form.dataset.dirty = 'true';
     }
     dirty = !!document.querySelector('#ledger form[data-dirty]');
-    if ($('value-form').dataset.dirty) { $('value-dirty').hidden = false; previewValues(); }
+    $('sold-price').disabled = busy || !$('sold-toggle').checked;
+    if ($('value-form').dataset.dirty) previewValues();
   }
   async function operation(action, onSuccess, message = 'Saving…', savedForm = null) {
     if (busy || !user || !loaded) return false;
     const version = epoch;
     const drafts = draftsExcept(savedForm);
+    const valueSnapshot = valueSaving ? [...$('value-form').querySelectorAll('input')].map(input => [input.value,input.checked]) : null;
     let focusAfterSave = null;
     lock(true); status(message);
     try {
@@ -242,7 +256,13 @@
         if (animation) await animation.finished.catch(() => {});
         if (version !== epoch) return false;
       }
-      onSuccess(result.data); dirty = false; render(); restoreDrafts(drafts);
+      onSuccess(result.data);
+      if (valueSnapshot) {
+        const unchanged = [...$('value-form').querySelectorAll('input')].every((input,i) => input.value === valueSnapshot[i][0] && input.checked === valueSnapshot[i][1]);
+        if (unchanged) delete $('value-form').dataset.dirty;
+        dirty = !!document.querySelector('#ledger form[data-dirty]');
+        previewValues();
+      } else {dirty = false; render(); restoreDrafts(drafts);}
       if (savedForm?.dataset.expense) {
         const row = [...$('expense-list').children].find(item => item.dataset.expense === savedForm.dataset.expense);
         // Restore focus synchronously after unlocking so a delayed frame cannot
@@ -251,9 +271,9 @@
       }
       status('Saved',false,{success:true,resolve:true}); return true;
     } catch (err) {
-      if (version === epoch) { if (err.code === 'PGRST116') $('retry').hidden = false; status(err.code === 'PGRST116' ? 'This vehicle changed on another device. Reload before saving again; your edits are still visible.' : (err.message || 'Could not save. Your changes are still visible; try again.'), true); }
+      if (version === epoch) { if (valueSaving) valueConflict = err.code === 'PGRST116'; if (valueSaving || err.code === 'PGRST116') $('retry').hidden = false; status(err.code === 'PGRST116' ? (valueSaving ? 'This vehicle changed on another device. Retry to review your edits.' : 'This vehicle changed on another device. Reload before saving again; your edits are still visible.') : (err.message || 'Could not save. Your changes are still visible; try again.'), true); }
       return false;
-    } finally { if (version === epoch) {lock(false); focusAfterSave?.focus({preventScroll:true});} }
+    } finally { if (version === epoch) {lock(false); focusAfterSave?.focus({preventScroll:true}); if (valueQueued && !valueSaving) queueValues();} }
   }
   async function saveCar(c, changes, savedForm = null) {
     return operation(() => client.from('vehicles').update({...changes,revision:c.revision + 1}).eq('id',c.id).eq('revision',c.revision).select().single(), data => {
@@ -276,6 +296,7 @@
   }
   async function sessionChanged(session) {
     if (session?.user?.id === user?.id) return;
+    clearTimeout(valueTimer); valueQueued = false; valueConflict = false;
     epoch++; user = session?.user || null; cars = []; selectedId = null; loaded = false; dirty = false; renderedPage = null; clearStatus();
     cancelDecode(); dialogToken++; vinSubmitting = false; $('vehicle-dialog').classList.remove('closing'); $('vehicle-dialog').close(); $('ledger').hidden = true; $('retry').hidden = true; $('logout').hidden = !user;
     restoreDrafts([]); $('add-expense-form').reset(); lock(false);
@@ -316,7 +337,30 @@
     if (error) status(error.message,true,{scope:'auth'}); else {setRoute(null,true); await sessionChanged(null);}
     lock(false);
   };
-  $('retry').onclick = () => {if (unsaved()) load(false,true);};
+  $('retry').onclick = async () => {
+    if (!$('value-form').dataset.dirty) {if (unsaved()) load(false,true); return;}
+    if (busy) return;
+    if (valueConflict) {
+      // Fetch a new revision, retaining edits. Never silently overwrite a conflict.
+      const c = current(), version = epoch;
+      let changes; try {changes = valueChanges(c);} catch (err) {status(err.message,true); return;}
+      lock(true);
+      try {
+        const {data,error} = await client.from('vehicles').select('*').eq('id',c.id).single();
+        if (error) throw error;
+        if (version !== epoch) return;
+        if (!confirm('This vehicle changed on another device. Apply your value edits to the latest record?')) return;
+        const drafts = draftsExcept($('value-form'));
+        cars[cars.findIndex(item => item.id === c.id)] = data;
+        render(); restoreDrafts(drafts);
+        if ('estimated_value' in changes) $('estimated-value').value = changes.estimated_value ?? '';
+        if ('sold_price' in changes) {$('sold-price').value = changes.sold_price ?? ''; $('sold-toggle').checked = changes.sold_price !== null;}
+        $('value-form').dataset.dirty = 'true'; dirty = true; valueConflict = false;
+      } catch (err) {status(err.message,true); return;}
+      finally {if (version === epoch) lock(false);}
+    }
+    await flushValues();
+  };
   function cancelDecode() {
     clearTimeout(decodeTimer); decodeController?.abort(); decodeController = null; decodeRequest++;
   }
@@ -469,18 +513,65 @@
     } catch (err) {status(err.message,true);}
   };
   function previewValues() {
-    try {renderTotals({...current(),estimated_value:amount($('estimated-value').value),sold_price:amount($('sold-price').value)});} catch (_) { /* Native validation reports invalid input on save. */ }
+    try {renderTotals({...current(),estimated_value:amount($('estimated-value').value),sold_price:$('sold-toggle').checked ? amount($('sold-price').value) : null});} catch (_) { /* Keep the last valid preview while an amount is incomplete. */ }
   }
-  $('value-form').oninput = () => {setDirty(); $('value-dirty').hidden = false; previewValues();};
-  $('ledger').addEventListener('input', e => {const form = e.target.closest('form'); if (form) form.dataset.dirty = 'true';});
-  $('value-form').onsubmit = async e => {
-    e.preventDefault(); const c = current(); if (!c) return;
-    try {
-      const estimated_value = amount($('estimated-value').value), sold_price = amount($('sold-price').value);
-      const changed = estimated_value !== c.estimated_value;
-      await saveCar(c,{estimated_value,sold_price,...(changed ? {valuation_source:estimated_value === null ? null : 'Manual',valuation_updated_at:estimated_value === null ? null : new Date().toISOString()} : {})}, $('value-form'));
-    } catch (err) {status(err.message,true);}
+  function valueChanges(c) {
+    const estimated_value = amount($('estimated-value').value);
+    const sold_price = $('sold-toggle').checked ? amount($('sold-price').value) : null;
+    if ($('sold-toggle').checked && sold_price === null) throw Error('Enter a sold price or turn Sold off.');
+    const changes = {};
+    if (estimated_value !== c.estimated_value) Object.assign(changes,{estimated_value,valuation_source:estimated_value === null ? null : 'Manual',valuation_updated_at:estimated_value === null ? null : new Date().toISOString()});
+    if (sold_price !== c.sold_price) changes.sold_price = sold_price;
+    return changes;
+  }
+  function queueValues() {
+    valueQueued = true; clearTimeout(valueTimer);
+    valueTimer = setTimeout(() => {if (!busy) flushValues();},0);
+  }
+  async function flushValues() {
+    clearTimeout(valueTimer);
+    if (valueTask) return valueTask;
+    if (busy || !current()) return false;
+    valueQueued = false;
+    if (!$('value-form').dataset.dirty) return true;
+    if (valueConflict) return false;
+    let changes;
+    try {changes = valueChanges(current());}
+    catch (err) {status(err.message,true); return false;}
+    if (!Object.keys(changes).length) {
+      delete $('value-form').dataset.dirty;
+      dirty = !!document.querySelector('#ledger form[data-dirty]');
+      if (notice.scope === 'save') clearStatus();
+      return true;
+    }
+    valueSaving = true;
+    valueTask = saveCar(current(),changes,$('value-form'));
+    try {return await valueTask;}
+    finally {valueTask = null; valueSaving = false; if (valueQueued && !valueConflict) queueValues();}
+  }
+  $('value-form').oninput = e => {
+    if (e.target.id === 'sold-toggle') return;
+    clearTimeout(valueTimer); valueQueued = false;
+    setDirty(); previewValues();
   };
+  $('value-form').addEventListener('focusout', e => {
+    if (e.target.id !== 'sold-toggle' && (!busy || valueSaving) && $('value-form').dataset.dirty) queueValues();
+  });
+  $('sold-toggle').onchange = () => {
+    const toggle = $('sold-toggle');
+    if (!toggle.checked && ($('sold-price').value.trim() || current()?.sold_price !== null)) {
+      if (!confirm('Clear the recorded sold price?')) {toggle.checked = true; return;}
+      $('sold-price').value = '';
+    }
+    $('sold-price').disabled = !toggle.checked;
+    $('value-form').dataset.dirty = 'true'; setDirty(); previewValues();
+    if (toggle.checked) $('sold-price').focus(); else queueValues();
+  };
+  $('ledger').addEventListener('input', e => {const form = e.target.closest('form'); if (form && e.target.id !== 'sold-toggle') form.dataset.dirty = 'true';});
+  $('value-form').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.isComposing) {e.preventDefault(); if (busy) valueQueued = true; else flushValues();}
+  });
+  $('value-form').onsubmit = e => {e.preventDefault(); flushValues();};
   $('check-carfax').onclick = () => {
     const c = current(); if (c?.vin) navigator.clipboard?.writeText(c.vin).then(() => status('VIN copied · ZIP 73013',false,{scope:'info',duration:2000})).catch(() => status(`VIN ${c.vin} · ZIP 73013`,false,{scope:'info',duration:4000}));
   };

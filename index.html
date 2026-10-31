@@ -60,20 +60,18 @@
             <h2 id="expenses-heading">Expenses</h2>
             <div id="expense-list"></div>
             <form id="add-expense-form" class="expense-line">
-              <input id="expense-description" name="description" type="text" aria-label="New expense description" placeholder="Expense" maxlength="100" required>
-              <input id="expense-amount" name="amount" aria-label="New expense amount in dollars" placeholder="$" type="number" inputmode="decimal" step="0.01" min="0" max="100000000" required>
+              <input id="expense-description" name="description" type="text" aria-label="New expense description" maxlength="100" required>
+              <span class="money-input"><span aria-hidden="true">$</span><input id="expense-amount" name="amount" aria-label="New expense amount in dollars" type="number" inputmode="decimal" step="0.01" min="0" max="100000000" required></span>
               <button type="submit">Add</button>
             </form>
             <div class="total"><span>Total invested</span><strong id="expense-total"></strong></div>
           </section>
           <section class="valuation" aria-label="Vehicle value and sale">
             <form id="value-form">
-              <label for="estimated-value">Estimated value</label><input id="estimated-value" name="estimated_value" type="number" inputmode="decimal" step="0.01" min="0" max="100000000">
-              <p id="value-source" class="caption"></p>
-              <a href="https://www.carfax.com/value/" target="_blank" rel="noopener noreferrer" id="check-carfax">CARFAX · 73013</a>
-              <label for="sold-price" class="sale-label">Sold price</label><input id="sold-price" name="sold_price" aria-describedby="sale-help" type="number" inputmode="decimal" step="0.01" min="0" max="100000000">
-              <p id="sale-help" class="sr-only">Leave blank if the vehicle is not sold.</p>
-              <div class="save-row"><button type="submit" aria-label="Save values">Save</button><span id="value-dirty" class="caption" hidden>Unsaved</span></div>
+              <label for="estimated-value">Estimated value</label><input id="estimated-value" name="estimated_value" type="text" inputmode="decimal" autocomplete="off">
+              <a href="https://www.carfax.com/value/" target="_blank" rel="noopener noreferrer" id="check-carfax">CARFAX Value</a>
+              <div class="sale-heading"><label for="sold-price">Sold price</label><label class="sold-switch"><input id="sold-toggle" type="checkbox" role="switch" aria-label="Sold"><span aria-hidden="true"></span></label></div><input id="sold-price" name="sold_price" aria-describedby="sale-help" type="text" inputmode="decimal" autocomplete="off">
+              <p id="sale-help" class="sr-only">Turn on Sold to enter a sale price.</p>
             </form>
             <div class="profit"><span id="profit-label">Potential profit</span><strong id="profit"></strong></div>
           </section>
