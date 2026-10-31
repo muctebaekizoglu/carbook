@@ -1,241 +1,283 @@
-/* Carbook: intentionally dependency-free. Records stay in this browser. */
+/* Buildless Carbook. The only external library is the pinned Supabase SDK. */
 (() => {
   'use strict';
-  const STORAGE_KEY = 'carbook.records.v2';
-  const SELECTED_KEY = 'carbook.selected.v2';
-  const DEFAULT_ZIP = '73013';
   const $ = id => document.getElementById(id);
-  const formatMoney = n => n === null || n === undefined || !Number.isFinite(n)
-    ? '—' : new Intl.NumberFormat('en-US', {style:'currency',currency:'USD',maximumFractionDigits:2,minimumFractionDigits: n % 1 ? 2 : 0}).format(n);
-  const digits = n => new Intl.NumberFormat('en-US').format(n);
-  const toAmount = s => { const n = Number(s); return s === '' || s === null || !Number.isFinite(n) || n < 0 ? null : Math.round(n * 100) / 100; };
-  const newId = () => typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2);
-  const cleanStr = (value, limit=100) => String(value ?? '').trim().slice(0,limit);
-
-  function sanitizeCar(raw) {
-    if (!raw || typeof raw !== 'object') return null;
-    return {
-      id: cleanStr(raw.id,100) || newId(),
-      vin: cleanStr(raw.vin,17).toUpperCase(),
-      year: Number.isInteger(Number(raw.year)) && Number(raw.year) >= 1900 && Number(raw.year) <= 2100 ? String(raw.year) : '',
-      make: cleanStr(raw.make,50), model: cleanStr(raw.model,70), trim: cleanStr(raw.trim,70),
-      mileage: raw.mileage === '' || raw.mileage === null || raw.mileage === undefined ? '' : String(Math.max(0,Math.min(9999999, Math.floor(Number(raw.mileage)||0)))),
-      estimatedValue: toAmount(raw.estimatedValue === null || raw.estimatedValue === undefined ? '' : raw.estimatedValue),
-      estimatedUpdatedAt: cleanStr(raw.estimatedUpdatedAt,64),
-      soldPrice: toAmount(raw.soldPrice === null || raw.soldPrice === undefined ? '' : raw.soldPrice),
-      expenses: Array.isArray(raw.expenses) ? raw.expenses.slice(0,10000).map(exp => ({
-        id: cleanStr(exp?.id,100) || newId(),
-        description: cleanStr(exp?.description,100), amount: toAmount(exp?.amount) ?? 0
-      })) : []
-    };
+  const {amount, totals} = window.CarbookFinance;
+  const money = value => value === null ? '—' : new Intl.NumberFormat('en-US', {style:'currency',currency:'USD',minimumFractionDigits:2,maximumFractionDigits:2}).format(value);
+  const config = window.CARBOOK_CONFIG || {};
+  const configured = /^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(config.supabaseUrl || '') && !!config.supabasePublishableKey && !/^(sb_secret_|ey.*service_role)/.test(config.supabasePublishableKey);
+  let client, user = null, cars = [], selectedId = null, editingId = null;
+  let busy = false, dirty = false, loaded = false, epoch = 0, authMode = 'login', recovery = false;
+  let localImport = null, importDismissed = false;
+  const current = () => cars.find(c => c.id === selectedId);
+  function status(message = '', error = false) { $('status').textContent = message; $('status').className = error ? 'error' : ''; }
+  function lock(value) {
+    busy = value;
+    document.querySelectorAll('button,input,select').forEach(el => {el.disabled = value;});
   }
-  function loadCars() {
-    try {
-      const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-      return Array.isArray(raw) ? raw.slice(0,200).map(sanitizeCar).filter(Boolean) : [];
-    } catch (_) { return []; }
+  function unsaved() { return !dirty || confirm('Discard unsaved changes?'); }
+  function setDirty() { dirty = true; status('Unsaved changes'); }
+  function authView(mode) {
+    authMode = mode; $('password').value = '';
+    $('auth-title').textContent = {login:'Log in',signup:'Create account',reset:'Reset password',update:'Set new password'}[mode];
+    $('auth-submit').textContent = {login:'Log in',signup:'Create account',reset:'Send reset link',update:'Save password'}[mode];
+    $('email-field').hidden = mode === 'update'; $('email').required = mode !== 'update';
+    $('password-field').hidden = mode === 'reset'; $('password').required = mode !== 'reset';
+    $('password').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+    $('password').minLength = mode === 'login' ? 1 : 8;
+    $('auth-toggle').textContent = mode === 'login' ? 'Create account' : 'Back to login';
+    $('auth-toggle').hidden = mode === 'update'; $('forgot').hidden = mode !== 'login';
+    $('auth').hidden = false; $('ledger').hidden = true;
   }
-  let cars = loadCars();
-  let selectedId = null;
-  try { selectedId = localStorage.getItem(SELECTED_KEY) || cars[0]?.id || null; } catch (_) { selectedId = cars[0]?.id || null; }
-  if (!cars.some(c => c.id === selectedId)) selectedId = cars[0]?.id || null;
-  let editingId = null, decodeTimer, decodeRequest = 0, toastTimer;
-  const car = () => cars.find(c => c.id === selectedId) || null;
-  const invested = c => c.expenses.reduce((sum, ex) => sum + (toAmount(ex.amount) || 0), 0);
-  const name = c => [c.year,c.make,c.model].filter(Boolean).join(' ') || (c.vin ? `VIN ${c.vin.slice(-6)}` : 'Untitled vehicle');
-
-  function save() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(cars));
-      if (selectedId) localStorage.setItem(SELECTED_KEY, selectedId); else localStorage.removeItem(SELECTED_KEY);
-    } catch (_) { document.querySelector('.private-note').textContent = 'Storage unavailable — export a backup'; }
-  }
-  function notify(message) {
-    const el = $('toast'); el.textContent = message; el.classList.add('show');
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), 3200);
-  }
-  function nav() {
-    const list = $('vehicle-list'); list.replaceChildren();
-    cars.forEach(c => {
-      const button = document.createElement('button'); button.type='button';
-      button.className = 'nav-vehicle' + (c.id === selectedId ? ' active' : '');
-      button.setAttribute('aria-current', c.id === selectedId ? 'page' : 'false');
-      const labels = document.createElement('span');
-      const title = document.createElement('span'); title.className='nav-name'; title.textContent=name(c);
-      const note = document.createElement('span'); note.className='nav-note'; note.textContent=c.soldPrice === null ? 'Owned' : 'Sold';
-      const chevron = document.createElement('span'); chevron.className='nav-chevron'; chevron.setAttribute('aria-hidden','true'); chevron.textContent='›';
-      labels.append(title,note); button.append(labels,chevron);
-      button.addEventListener('click', () => {selectedId=c.id;save();render();}); list.append(button);
-    });
+  function renderTotals(c = current()) {
+    if (!c) return;
+    const t = totals(c);
+    $('expense-total').textContent = money(t.invested);
+    $('profit-label').textContent = t.sold ? 'Actual profit' : 'Potential profit';
+    $('profit').textContent = money(t.profit);
   }
   function render() {
-    nav(); const c=car();
-    $('vehicle-view').hidden=!c; $('empty-state').hidden=!!c;
-    $('breadcrumb').textContent=c ? 'Vehicles  /  ' + name(c) : 'Vehicles';
+    const select = $('vehicle-select'); select.replaceChildren();
+    if (!cars.some(c => c.id === selectedId)) selectedId = cars[0]?.id || null;
+    for (const c of cars) {
+      const option = document.createElement('option'); option.value = c.id;
+      option.textContent = c.name + (c.sold_price !== null ? ' · Sold' : ''); select.append(option);
+    }
+    select.value = selectedId || ''; select.hidden = !cars.length;
+    const c = current(); $('empty-state').hidden = !!c; $('vehicle-view').hidden = !c;
     if (!c) return;
-    $('vehicle-year').textContent=c.soldPrice !== null ? 'SOLD' : 'IN YOUR GARAGE';
-    $('vehicle-title').textContent=name(c) + (c.trim ? ' ' + c.trim : '');
-    $('vehicle-vin').textContent=c.vin || 'No VIN added';
-    $('vehicle-mileage').textContent=c.mileage !== '' ? digits(Number(c.mileage)) + ' mi' : 'Mileage not set';
-    $('estimated-value').value=c.estimatedValue ?? '';
-    $('sold-price').value=c.soldPrice ?? '';
-    updateValueCaption();
-    renderExpenses();updateTotals();
+    $('vehicle-title').textContent = c.name; $('vehicle-vin').textContent = c.vin || 'VIN not recorded';
+    $('estimated-value').value = c.estimated_value ?? ''; $('sold-price').value = c.sold_price ?? '';
+    const date = c.valuation_updated_at ? new Date(c.valuation_updated_at) : null;
+    $('value-source').textContent = c.estimated_value === null ? '' : `${c.valuation_source || 'Manual'}${date && Number.isFinite(date.getTime()) ? ' · ' + date.toLocaleDateString('en-US', {month:'short',day:'numeric',year:'numeric'}) : ''}`;
+    $('value-dirty').hidden = true;
+    renderExpenses(c); renderTotals(c);
   }
-  function updateValueCaption() {
-    const c=car(); if (!c) return;
-    const d=c.estimatedUpdatedAt ? new Date(c.estimatedUpdatedAt) : null;
-    $('value-description').textContent=c.estimatedValue !== null && d && !Number.isNaN(d.getTime())
-      ? `Manually entered · Updated ${new Intl.DateTimeFormat('en-US',{month:'short',day:'numeric',year:'numeric'}).format(d)}`
-      : 'Enter your latest vehicle estimate.';
-  }
-  function updateTotals() {
-    const c=car(); if (!c) return;
-    const total=invested(c); const sold=c.soldPrice !== null;
-    const worth=sold ? c.soldPrice : c.estimatedValue;
-    const profit=worth === null ? null : Math.round((worth-total)*100)/100;
-    $('metric-invested').textContent=formatMoney(total);
-    $('metric-invested-sub').textContent=`${c.expenses.length} recorded ${c.expenses.length === 1 ? 'cost' : 'costs'}`;
-    $('metric-value-label').textContent=sold ? 'Sold for' : 'Estimated value';
-    $('metric-market').textContent=formatMoney(worth);
-    $('metric-profit-label').textContent=sold ? 'Actual profit' : 'Potential profit';
-    $('metric-profit').textContent=formatMoney(profit);
-    $('metric-profit').className='metric-value'+(profit !== null ? (profit >= 0 ? ' positive' : ' negative') : '');
-    $('metric-profit-sub').textContent=profit === null ? 'Add a value to calculate' : sold ? 'Based on recorded costs' : 'If sold at this estimate';
-    $('result-title').textContent=sold ? 'Actual profit' : 'Potential profit';
-    $('result-amount').textContent=formatMoney(profit);
-    $('result-amount').className=profit !== null ? profit >= 0 ? 'positive':'negative' : '';
-    $('result-hint').textContent=sold ? 'Sale price minus total invested' : 'Estimated value minus total invested';
-    $('expense-total').textContent=formatMoney(total);
-  }
-  function renderExpenses() {
-    const c=car(); if (!c) return;
-    const list=$('expense-list'); list.replaceChildren();
-    $('expense-count').textContent=`${c.expenses.length} ${c.expenses.length===1?'entry':'entries'}`;
-    if (!c.expenses.length) {
-      const empty=document.createElement('div');empty.className='expense-empty';empty.textContent='No expenses yet. Add your first cost below.';list.append(empty);return;
+  function renderExpenses(c) {
+    const list = $('expense-list'); list.replaceChildren();
+    for (const exp of c.expenses) {
+      const row = document.createElement('form'); row.className = 'expense-line'; row.dataset.expense = exp.id;
+      const description = document.createElement('input'); description.value = exp.description;
+      description.maxLength = 100; description.required = true; description.setAttribute('aria-label','Expense description');
+      const value = document.createElement('input'); value.type = 'number'; value.inputMode = 'decimal'; value.step = '.01'; value.min = '0'; value.max = '100000000'; value.required = true; value.value = exp.amount; value.setAttribute('aria-label','Expense amount');
+      const actions = document.createElement('div'); actions.className = 'expense-actions';
+      const save = document.createElement('button'); save.type = 'submit'; save.textContent = 'Save'; save.setAttribute('aria-label',`Save ${exp.description}`);
+      const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Remove'; remove.setAttribute('aria-label',`Remove ${exp.description}`);
+      row.addEventListener('input', setDirty);
+      row.addEventListener('submit', e => {
+        e.preventDefault();
+        const text = description.value.trim(); if (!text) return description.reportValidity();
+        try {
+          const updated = c.expenses.map(item => item.id === exp.id ? {...item,description:text,amount:amount(value.value)} : item);
+          saveCar(c, {expenses:updated}, row);
+        } catch (err) { status(err.message, true); }
+      });
+      remove.addEventListener('click', () => {
+        if (confirm(`Remove ${exp.description}?`)) saveCar(c, {expenses:c.expenses.filter(item => item.id !== exp.id)}, row);
+      });
+      actions.append(save,remove); row.append(description,value,actions); list.append(row);
     }
-    c.expenses.forEach(exp => {
-      const line=document.createElement('div');line.className='expense-line';
-      const description=document.createElement('input');description.type='text';description.value=exp.description;description.maxLength=100;description.setAttribute('aria-label','Expense description');
-      description.addEventListener('input',()=>{exp.description=description.value;save();});
-      const amount=document.createElement('input');amount.type='number';amount.inputMode='decimal';amount.step='0.01';amount.min='0';amount.max='100000000';amount.className='line-amount';amount.value=exp.amount;amount.setAttribute('aria-label','Expense amount');
-      amount.addEventListener('input',()=>{const n=toAmount(amount.value);if(n!==null){exp.amount=n;save();updateTotals();}});
-      amount.addEventListener('blur',()=>{amount.value=exp.amount;});
-      const remove=document.createElement('button');remove.type='button';remove.className='remove-expense';remove.textContent='×';remove.title=`Remove ${exp.description||'expense'}`;remove.setAttribute('aria-label',remove.title);
-      remove.addEventListener('click',()=>{c.expenses=c.expenses.filter(e=>e.id!==exp.id);save();renderExpenses();updateTotals();});
-      line.append(description,amount,remove);list.append(line);
-    });
   }
-  $('add-expense-form').addEventListener('submit',event=>{
-    event.preventDefault();const c=car(); if(!c) return;
-    const description=cleanStr($('expense-description').value);const amount=toAmount($('expense-amount').value);
-    if(!description||amount===null) return;
-    c.expenses.push({id:newId(),description,amount});save();renderExpenses();updateTotals();
-    $('expense-description').value='';$('expense-amount').value='';$('expense-description').focus();
-  });
-  $('estimated-value').addEventListener('input',event=>{
-    const c=car();if(!c)return;
-    c.estimatedValue=toAmount(event.target.value);
-    c.estimatedUpdatedAt=c.estimatedValue === null ? '' : new Date().toISOString();
-    save();updateTotals();updateValueCaption();
-  });
-  $('sold-price').addEventListener('input',event=>{
-    const c=car();if(!c)return;c.soldPrice=toAmount(event.target.value);save();updateTotals();nav();
-    $('vehicle-year').textContent=c.soldPrice === null ? 'IN YOUR GARAGE' : 'SOLD';
-  });
-  $('check-carfax').addEventListener('click',async()=>{
-    const c=car();if(!c)return;
-    window.open('https://www.carfax.com/value/','_blank','noopener,noreferrer');
-    if(!c.vin){notify('Add a VIN in Edit details to look up your car.');return;}
-    try{await navigator.clipboard.writeText(c.vin);notify(`VIN copied — paste it on CARFAX, with ZIP ${DEFAULT_ZIP}.`);}
-    catch(_){notify(`Enter VIN ${c.vin} and ZIP ${DEFAULT_ZIP} on CARFAX.`);}
-  });
-
-  function setVinMessage(text,kind=''){$('vin-message').textContent=text;$('vin-message').className='help-text'+(kind?' '+kind:'');}
-  async function decodeVin(value) {
-    const token=++decodeRequest;
-    if(!/^[A-HJ-NPR-Z0-9]{17}$/.test(value)) {
-      if(value.length===17)setVinMessage('VIN contains an invalid character.','error');
-      else setVinMessage('Enter a VIN to automatically fill the vehicle details.');
-      return false;
+  function draftsExcept(savedForm) {
+    return [...document.querySelectorAll('#ledger form[data-dirty]')].filter(form => form !== savedForm).map(form => ({
+      id:form.id, expense:form.dataset.expense,
+      values:[...form.querySelectorAll('input')].map(input => input.value)
+    }));
+  }
+  function restoreDrafts(drafts) {
+    document.querySelectorAll('#ledger form').forEach(form => delete form.dataset.dirty);
+    for (const draft of drafts) {
+      const form = draft.id ? $(draft.id) : [...document.querySelectorAll('[data-expense]')].find(el => el.dataset.expense === draft.expense);
+      if (!form) continue;
+      [...form.querySelectorAll('input')].forEach((input,i) => input.value = draft.values[i]);
+      form.dataset.dirty = 'true';
     }
-    setVinMessage('Finding vehicle details…');
+    dirty = !!document.querySelector('#ledger form[data-dirty]');
+    if ($('value-form').dataset.dirty) { $('value-dirty').hidden = false; previewValues(); }
+  }
+  async function operation(action, onSuccess, message = 'Saving…', savedForm = null) {
+    if (busy || !user || !loaded) return false;
+    const version = epoch;
+    const drafts = draftsExcept(savedForm);
+    lock(true); status(message);
     try {
-      const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),12000);
-      let response;
-      try{response=await fetch(`https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/${encodeURIComponent(value)}?format=json`,{signal:controller.signal});}
-      finally{clearTimeout(timer);}
-      if(token!==decodeRequest || $('vehicle-dialog').open===false || $('form-vin').value!==value) return false;
-      if(!response.ok)throw Error('Lookup unavailable');
-      const data=await response.json();const decoded=data.Results?.[0];
-      if(!decoded || !decoded.Make || !decoded.Model)throw Error('No match');
-      const values={year:decoded.ModelYear,make:decoded.Make,model:decoded.Model,trim:decoded.Trim};
-      for(const [key,val] of Object.entries(values)) {if(val && !$("form-"+key).value)$("form-"+key).value=val;}
-      setVinMessage('Vehicle details found using NHTSA VIN data.','success');return true;
-    } catch(_) {if(token===decodeRequest)setVinMessage('VIN lookup unavailable. You can enter the details manually.','error');return false;}
+      const result = await action(); if (result.error) throw result.error;
+      if (version !== epoch) return false;
+      onSuccess(result.data); dirty = false; render(); restoreDrafts(drafts); status(dirty ? 'Saved. Other changes are unsaved.' : 'Saved'); return true;
+    } catch (err) {
+      if (version === epoch) { if (err.code === 'PGRST116') $('retry').hidden = false; status(err.code === 'PGRST116' ? 'This vehicle changed on another device. Reload before saving again; your edits are still visible.' : (err.message || 'Could not save. Your changes are still visible; try again.'), true); }
+      return false;
+    } finally { if (version === epoch) lock(false); }
   }
-  $('form-vin').addEventListener('input',event=>{
-    event.target.value=event.target.value.toUpperCase().replace(/\s/g,'');
-    clearTimeout(decodeTimer);decodeRequest++;
-    const vin=event.target.value;
-    if(vin.length===17) decodeTimer=setTimeout(()=>decodeVin(vin),450);
-    else setVinMessage(vin.length ? `${vin.length}/17 characters` : 'Enter a VIN to automatically fill the vehicle details.');
-  });
-  function openForm(id=null) {
-    editingId=id;const c=cars.find(item=>item.id===id);
-    $('dialog-title').textContent=c?'Edit vehicle':'Add a vehicle';
-    $('save-vehicle').textContent=c?'Save changes':'Add vehicle';
-    $('delete-vehicle').hidden=!c;$('form-error').hidden=true;
-    for(const key of ['vin','year','make','model','trim','mileage'])$('form-'+key).value=c?.[key]??'';
-    setVinMessage(c?.vin?'You can update the VIN or vehicle details.':'Enter a VIN to automatically fill the vehicle details.');
-    $('vehicle-dialog').showModal();
-    setTimeout(()=>$(c?.vin?'form-make':'form-vin').focus(),20);
+  async function saveCar(c, changes, savedForm = null) {
+    return operation(() => client.from('vehicles').update({...changes,revision:c.revision + 1}).eq('id',c.id).eq('revision',c.revision).select().single(), data => {
+      cars[cars.findIndex(item => item.id === c.id)] = data;
+    }, 'Saving…', savedForm);
   }
-  function closeForm(){clearTimeout(decodeTimer);decodeRequest++;$('vehicle-dialog').close();editingId=null;}
-  $('add-vehicle').addEventListener('click',()=>openForm());
-  $('empty-add').addEventListener('click',()=>openForm());
-  $('edit-vehicle').addEventListener('click',()=>openForm(selectedId));
-  $('close-dialog').addEventListener('click',closeForm);
-  $('cancel-dialog').addEventListener('click',closeForm);
-  $('vehicle-dialog').addEventListener('cancel',event=>{event.preventDefault();closeForm();});
-  $('vehicle-dialog').addEventListener('click',event=>{if(event.target===$('vehicle-dialog'))closeForm();});
-  $('vehicle-form').addEventListener('submit',async event=>{
-    event.preventDefault();
-    const values=Object.fromEntries(['vin','year','make','model','trim','mileage'].map(key=>[key,cleanStr($('form-'+key).value,key==='vin'?17:90)]));
-    values.vin=values.vin.toUpperCase();
-    const error=message=>{$('form-error').hidden=false;$('form-error').textContent=message;};
-    $('form-error').hidden=true;
-    if(values.vin && !/^[A-HJ-NPR-Z0-9]{17}$/.test(values.vin))return error('Please enter a valid 17-character VIN, or leave the VIN blank.');
-    if(!values.vin && !(values.make && values.model))return error('Enter a VIN, or at least a make and model.');
-    if(values.year && (!/^(19|20)\d\d$/.test(values.year) || +values.year>2100))return error('Enter a valid model year.');
-    const existing=cars.find(c=>c.id===editingId);
-    if(existing)Object.assign(existing,values);
-    else{const created=sanitizeCar({id:newId(),...values,expenses:[],estimatedValue:null,soldPrice:null});cars.push(created);selectedId=created.id;}
-    save();closeForm();render();
-    notify(existing?'Vehicle updated.':'Vehicle added.');
-  });
-  $('delete-vehicle').addEventListener('click',()=>{
-    const c=cars.find(v=>v.id===editingId);if(!c)return;
-    if(!confirm(`Delete ${name(c)} and all its expenses? This cannot be undone.`))return;
-    cars=cars.filter(v=>v.id!==c.id);selectedId=cars[0]?.id||null;save();closeForm();render();notify('Vehicle deleted.');
-  });
-  $('export-data').addEventListener('click',()=>{
-    const data={app:'carbook',version:2,exportedAt:new Date().toISOString(),vehicles:cars};
-    const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
-    const a=document.createElement('a');a.href=url;a.download='carbook-backup.json';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);notify('Backup exported.');
-  });
-  $('import-data').addEventListener('click',()=>$('import-file').click());
-  $('import-file').addEventListener('change',async(event)=>{
-    const file=event.target.files?.[0];event.target.value='';if(!file)return;
-    try{
-      if(file.size>5_000_000)throw Error('Backup file is too large.');
-      const json=JSON.parse(await file.text());
-      if(json.app!=='carbook'||!Array.isArray(json.vehicles))throw Error('Not a Carbook backup.');
-      const restored=json.vehicles.slice(0,200).map(sanitizeCar).filter(Boolean);
-      if(!confirm('Importing replaces all vehicles currently saved in this browser. Continue?'))return;
-      cars=restored;selectedId=cars[0]?.id||null;save();render();notify('Backup imported.');
-    }catch(e){notify(e.message||'Could not import backup.');}
-  });
-  render();
+  async function load(silent = false) {
+    if (!user || busy || (silent && (dirty || $('vehicle-dialog').open || document.querySelector('#ledger input:focus')))) return;
+    const version = epoch;
+    lock(true); if (!silent) status('Loading…');
+    try {
+      const {data,error} = await client.from('vehicles').select('*').order('created_at');
+      if (error) throw error; if (version !== epoch) return;
+      cars = data; loaded = true; dirty = false; restoreDrafts([]); $('add-expense-form').reset(); render();
+      $('ledger').hidden = recovery; $('retry').hidden = true;
+      if (!silent || $('status').className === 'error') status('');
+      await offerImport(version);
+    } catch (err) { if (version === epoch) {status('Could not load vehicles: ' + err.message, true); $('retry').hidden = false;} }
+    finally { if (version === epoch) lock(false); }
+  }
+  async function sessionChanged(session) {
+    if (session?.user?.id === user?.id) return;
+    epoch++; user = session?.user || null; cars = []; selectedId = null; loaded = false; dirty = false; importDismissed = false;
+    $('vehicle-dialog').close(); $('ledger').hidden = true; $('retry').hidden = true; $('logout').hidden = !user;
+    $('import-prompt').hidden = true; restoreDrafts([]); $('add-expense-form').reset(); lock(false);
+    if (!user) {recovery = false; authView('login'); status(''); return;}
+    $('auth').hidden = true;
+    if (recovery) authView('update');
+    await load();
+  }
+  $('auth-toggle').onclick = () => {status(''); $('password').value = ''; authView(authMode === 'login' ? 'signup' : 'login');};
+  $('forgot').onclick = () => {status(''); authView('reset');};
+  $('auth-form').onsubmit = async e => {
+    e.preventDefault(); if (busy || !client) return;
+    const mode = authMode; lock(true); status('Please wait…');
+    const email = $('email').value.trim(), password = $('password').value;
+    const redirectTo = location.origin + location.pathname;
+    try {
+      let result;
+      if (mode === 'login') result = await client.auth.signInWithPassword({email,password});
+      if (mode === 'signup') result = await client.auth.signUp({email,password,options:{emailRedirectTo:redirectTo}});
+      if (mode === 'reset') result = await client.auth.resetPasswordForEmail(email,{redirectTo});
+      if (mode === 'update') result = await client.auth.updateUser({password});
+      if (result.error) throw result.error;
+      $('password').value = '';
+      if (mode === 'reset') status('If this email has an account, a reset link will arrive shortly.');
+      else if (mode === 'signup' && !result.data.session) status('Check your email to confirm your account, then log in.');
+      else if (mode === 'update') {recovery = false; $('auth').hidden = true; lock(false); await load(); status('Password updated.');}
+      else {lock(false); await sessionChanged(result.data.session);}
+    } catch (err) {status(err.message || 'Authentication failed. Try again.', true);}
+    finally {lock(false);}
+  };
+  $('logout').onclick = async () => {
+    if (!unsaved()) return;
+    lock(true);
+    const {error} = await client.auth.signOut({scope:'local'});
+    if (error) status(error.message,true); else await sessionChanged(null);
+    lock(false);
+  };
+  $('retry').onclick = () => {if (unsaved()) load();};
+  $('vehicle-select').onchange = e => {
+    if (!unsaved()) { e.target.value = selectedId; return; }
+    selectedId = e.target.value; dirty = false; restoreDrafts([]); $('add-expense-form').reset(); render();
+  };
+  function openForm(id = null) {
+    if (!unsaved()) return;
+    dirty = false; restoreDrafts([]); $('add-expense-form').reset(); render(); editingId = id; const c = cars.find(v => v.id === id);
+    $('dialog-title').textContent = c ? 'Edit vehicle' : 'Add vehicle';
+    $('form-name').value = c?.name || ''; $('form-vin').value = c?.vin || '';
+    $('delete-vehicle').hidden = !c; $('form-error').textContent = '';
+    $('vehicle-dialog').showModal(); $('form-name').focus();
+  }
+  $('add-vehicle').onclick = () => openForm(); $('edit-vehicle').onclick = () => openForm(selectedId);
+  $('cancel-dialog').onclick = () => $('vehicle-dialog').close();
+  $('vehicle-dialog').addEventListener('cancel', e => {if (busy) e.preventDefault();});
+  $('vehicle-form').onsubmit = async e => {
+    e.preventDefault(); const name = $('form-name').value.trim(), vin = $('form-vin').value.trim().toUpperCase();
+    if (!name || !/^[A-HJ-NPR-Z0-9]{17}$/.test(vin)) {$('form-error').textContent = 'Enter a vehicle name and a valid 17-character VIN.'; return;}
+    const c = cars.find(v => v.id === editingId);
+    const ok = c ? await saveCar(c,{name,vin,...(vin !== c.vin ? {estimated_value:null,valuation_source:null,valuation_updated_at:null} : {})}) : await operation(() => client.from('vehicles').insert({user_id:user.id,name,vin}).select().single(), data => {cars.push(data); selectedId = data.id;});
+    if (ok) $('vehicle-dialog').close();
+  };
+  $('delete-vehicle').onclick = async () => {
+    const c = cars.find(v => v.id === editingId);
+    if (!c || !confirm(`Delete ${c.name} and all its expenses?`)) return;
+    const ok = await operation(() => client.from('vehicles').delete().eq('id',c.id).eq('revision',c.revision).select().single(), () => {cars = cars.filter(v => v.id !== c.id);});
+    if (ok) $('vehicle-dialog').close();
+  };
+  $('add-expense-form').addEventListener('input',setDirty);
+  $('add-expense-form').onsubmit = async e => {
+    e.preventDefault(); const c = current(); if (!c) return;
+    try {
+      const description = $('expense-description').value.trim(); if (!description) return;
+      const value = amount($('expense-amount').value); if (value === null) return;
+      if (await saveCar(c,{expenses:[...c.expenses,{id:crypto.randomUUID(),description,amount:value}]}, $('add-expense-form'))) $('add-expense-form').reset();
+    } catch (err) {status(err.message,true);}
+  };
+  function previewValues() {
+    try {renderTotals({...current(),estimated_value:amount($('estimated-value').value),sold_price:amount($('sold-price').value)});} catch (_) { /* Native validation reports invalid input on save. */ }
+  }
+  $('value-form').oninput = () => {setDirty(); $('value-dirty').hidden = false; previewValues();};
+  $('ledger').addEventListener('input', e => {const form = e.target.closest('form'); if (form) form.dataset.dirty = 'true';});
+  $('value-form').onsubmit = async e => {
+    e.preventDefault(); const c = current(); if (!c) return;
+    try {
+      const estimated_value = amount($('estimated-value').value), sold_price = amount($('sold-price').value);
+      const changed = estimated_value !== c.estimated_value;
+      await saveCar(c,{estimated_value,sold_price,...(changed ? {valuation_source:estimated_value === null ? null : 'Manual',valuation_updated_at:estimated_value === null ? null : new Date().toISOString()} : {})}, $('value-form'));
+    } catch (err) {status(err.message,true);}
+  };
+  $('check-carfax').onclick = () => {
+    const c = current(); if (c?.vin) navigator.clipboard?.writeText(c.vin).then(() => status('VIN copied. Enter it on CARFAX with ZIP 73013.')).catch(() => status(`Use VIN ${c.vin} and ZIP 73013 on CARFAX.`));
+  };
+  async function offerImport(version) {
+    if (importDismissed || !localImport || version !== epoch) return;
+    const {data,error} = await client.from('imports').select('source_key').eq('source_key',localImport.key);
+    if (version !== epoch) return;
+    if (error) {status('Vehicles loaded. Could not check browser import; retry to check again.',true); $('retry').hidden = false; return;}
+    $('import-prompt').hidden = data.length > 0;
+  }
+  $('dismiss-import').onclick = () => { importDismissed = true; $('import-prompt').hidden = true; };
+  $('import-local').onclick = async () => {
+    if (!unsaved() || !confirm(`Import ${localImport.records.length} browser vehicle(s) into ${user.email}? Existing cloud vehicles will be kept. Browser records will remain as a backup.`)) return;
+    restoreDrafts([]);
+    const ok = await operation(() => client.rpc('import_vehicles',{source:localImport.key,records:localImport.records}), () => { $('import-prompt').hidden = true; }, 'Importing…');
+    if (ok) {await load(); status('Import complete. Browser originals have been kept.');}
+  };
+  async function readLegacy() {
+    const raw = localStorage.getItem('carbook.records.v2'); if (!raw) return;
+    const records = JSON.parse(raw); if (!Array.isArray(records) || !records.length) return;
+    if (records.length > 200) throw Error('Browser backup exceeds 200 vehicles; originals were kept.');
+    const digest = await crypto.subtle.digest('SHA-256',new TextEncoder().encode(raw));
+    const key = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2,'0')).join('');
+    const converted = records.map((c,index) => {
+      const name = String(c.name || [c.year,c.make,c.model,c.trim].filter(Boolean).join(' ') || 'Untitled vehicle').trim().slice(0,150);
+      const expenses = (c.expenses || []).map(e => {
+        const value = amount(e.amount); if (value === null || !String(e.description || '').trim()) throw Error('A browser expense is incomplete; originals were kept.');
+        return {id:crypto.randomUUID(),description:String(e.description).trim().slice(0,100),amount:value};
+      });
+      const estimated_value = amount(c.estimatedValue), sold_price = amount(c.soldPrice);
+      const date = c.estimatedUpdatedAt && Number.isFinite(Date.parse(c.estimatedUpdatedAt)) ? new Date(c.estimatedUpdatedAt).toISOString() : null;
+      return {name,vin:String(c.vin || '').toUpperCase(),expenses,estimated_value,sold_price,valuation_source:estimated_value === null ? null : 'Manual',valuation_updated_at:date,legacy_key:String(c.id || index)};
+    });
+    localImport = {key,records:converted};
+  }
+  window.addEventListener('beforeunload', e => {if (dirty || busy) {e.preventDefault(); e.returnValue = '';}});
+  window.addEventListener('focus', () => {if (loaded && !recovery) load(true);});
+  window.addEventListener('online', () => {if (loaded && !recovery) load(true);});
+  setInterval(() => {if (loaded && !recovery && !document.hidden) load(true);},30000);
+  async function init() {
+    if (!configured) {status('Cloud saving is not configured. Follow the Supabase setup in README.md. Existing browser records have been kept.'); return;}
+    if (!window.supabase) {status('The authentication library could not load. Reload to try again.',true); return;}
+    // Reject JWT service-role keys as well as modern secret keys.
+    try {if (config.supabasePublishableKey.startsWith('ey')) {const payload = JSON.parse(atob(config.supabasePublishableKey.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))); if (payload.role !== 'anon') throw Error('Only an anon or publishable key is allowed.');}}
+    catch (err) {status('Invalid public Supabase key. Check config.js.',true); return;}
+    let legacyError = '';
+    try {await readLegacy();} catch (err) {legacyError = 'Browser import unavailable: ' + err.message;}
+    client = window.supabase.createClient(config.supabaseUrl,config.supabasePublishableKey,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+    client.auth.onAuthStateChange((event,session) => {
+      if (event === 'PASSWORD_RECOVERY') recovery = true;
+      // Defer database requests until Supabase releases its auth lock.
+      setTimeout(async () => {await sessionChanged(session); if (event === 'PASSWORD_RECOVERY') authView('update');},0);
+    });
+    status('Loading…');
+    const {data,error} = await client.auth.getSession();
+    if (error) {authView('login'); status(error.message,true); return;}
+    if (data.session) await sessionChanged(data.session); else {authView('login'); status('');}
+    if (legacyError) status(legacyError,true);
+    const params = new URLSearchParams(location.hash.slice(1));
+    if (params.get('error_description')) status(params.get('error_description'),true);
+  }
+  init().catch(err => {status(err.message || 'Unable to start Carbook.',true); lock(false);});
 })();

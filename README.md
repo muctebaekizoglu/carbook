@@ -1,36 +1,58 @@
 # Carbook
 
-A deliberately simple vehicle expense and profit tracker. No framework, accounts, packages, or build step.
+A small HTML/CSS/JavaScript vehicle ledger. Expenses, estimated value, optional sale price, and profit. No framework or build step. Supabase provides email/password authentication and PostgreSQL storage. The pinned Supabase JS 2.49.8 browser SDK is included in `vendor/supabase.js` (MIT; upstream license in `vendor/SUPABASE-LICENSE`).
 
-## Features
+## One-time Supabase setup
 
-- Add vehicles by VIN (automatic make/model/year lookup through the public NHTSA vPIC API), or enter the details manually.
-- Add, edit, and remove expenses; totals and potential profit update as you type.
-- Enter an estimated value and optional sale price. When sold price is provided, the result changes from potential to actual profit.
-- A CARFAX shortcut opens the official value page and copies the VIN to your clipboard. Use ZIP **73013** there, then enter the value in Carbook.
-- Saves to `localStorage` on the current browser; JSON import and export for backup.
-- Mobile responsive.
+Cloud saving is implemented but **not configured or live-verified** in this checkout. No credentials were present. Until configured, the page displays a setup message and does not claim records are saved. Existing `carbook.records.v2` browser data is untouched.
 
-## Start / publish
+1. Create a Supabase project at https://supabase.com/dashboard. Keep its database password private.
+2. Open **SQL Editor → New query**, paste all of [`supabase/schema.sql`](supabase/schema.sql), and run it once against the new database. This creates vehicles, expenses stored as validated JSON per vehicle, valuation metadata, import receipts, owner-only RLS policies, and a transactional import function. It does not seed any financial data. Do not run it on top of an unrelated existing schema.
+3. Under **Project Settings → API / API Keys**, copy the **Project URL** and **publishable key** (`sb_publishable_…`). The legacy `anon` key also works. Edit `config.js`:
+   ```js
+   window.CARBOOK_CONFIG = {
+     supabaseUrl: 'https://YOUR_PROJECT.supabase.co',
+     supabasePublishableKey: 'YOUR_PUBLIC_PUBLISHABLE_KEY'
+   };
+   ```
+   These two values are intentionally public. Never paste a secret key (`sb_secret_…`), `service_role` key, database password, or connection string here. Access protection comes from authentication and RLS, not from hiding the public key.
+4. In **Authentication → Sign In / Providers**, enable **Email**, email/password sign-in, and email confirmation. Set a minimum password length of 8 or higher; the app accepts at least 8 for new/reset passwords.
+5. In **Authentication → URL Configuration**, set **Site URL** to the production URL (for example `https://carbook.vercel.app`). Add the exact application root URLs to **Redirect URLs**, including the trailing slash: `https://carbook.vercel.app/`, your custom domain if used, and `http://localhost:5173/` for development. Add each preview URL explicitly if testing confirmation/reset links there. The app sends users back to the root URL for confirmation and password recovery.
+6. Configure **Authentication → Email → SMTP Settings** with a production email provider and verified sender. Supabase's default sender is intended for limited testing; delivery and rate limits must be verified. Keep default confirmation/recovery templates compatible with Supabase `ConfirmationURL` links.
+7. Commit the public config and project changes to GitHub. Vercel: import this repository, choose **Other**, leave build command unset and output directory as the repository root. Pushes deploy automatically. No Vercel secrets or backend are required for the manual valuation version. `vercel.json` prevents stale config and applies basic security headers.
+8. Open the deployed site, create an account, confirm its email, and log in. Follow the live verification checklist below before relying on cloud saving.
 
-Open `index.html` to try it locally. For full VIN lookup testing, use a local server because some browser security settings restrict network requests from `file://` pages:
+For local preview: `python3 -m http.server 5173` and open http://localhost:5173/. Use an HTTP server rather than opening index.html as a file.
 
-```bash
-python3 -m http.server 8000
-```
+## Saving and device sync
 
-Visit `http://localhost:8000`.
+Every save waits for Supabase before showing “Saved.” Fields use explicit Save buttons; unsaved changes are indicated and navigation warns before discarding them. Failed saves leave input visible for retry. A revision check prevents stale saves from overwriting a concurrent edit; reload after a conflict. Browser edits are not an offline queue: keep the page open and retry if a network request fails.
 
-To publish like a typical GitHub → Vercel project: commit this directory to a GitHub repository called `carbook`; in the Vercel dashboard, import that repository. Framework preset: **Other**. Root directory: `/`. No build command or output directory configuration required. Each push to `main` automatically deploys after Git integration.
+Signed-in sessions persist using the Supabase SDK and refresh automatically. Cloud records are fetched after login, on focus/online, and approximately every 30 seconds while visible and idle. Polling pauses while edits or a vehicle dialog are open. This does not require enabling Realtime. Logout clears the current device session and visible account records.
 
-## CARFAX pricing limitation
+Expenses include the purchase price: record it as an expense to include it in total invested. Profit is estimated value minus expenses when unsold, and sold price minus expenses when sold. Blank means unknown; zero is a valid recorded amount. A sale price marks a vehicle sold; clear it to mark unsold. Calculations sum integer cents. Estimates are manually entered and their source/date is stored. Changing a VIN clears the previous estimate to avoid showing a value for another vehicle.
 
-**Carbook does not automatically retrieve or update CARFAX valuations.** The consumer website does not provide a documented public valuation API that this project can legitimately call. CARFAX directs third-party integrations to its business development team: https://www.carfax.com/company/partners. CARFAX and NHTSA provide different things: NHTSA's public API returns vehicle specifications, **not value**.
+## Existing browser records
 
-A genuine 72-hour auto-refresh feature would require CARFAX authorization and an agreed API/data contract, as well as a cloud database and a scheduled backend process. In the meantime, values are explicitly marked as manually entered; no invented valuations or fake refresh timestamps appear.
+On the same origin/browser where the previous site stored data, login offers an explicit import into the displayed account. Import merges with cloud vehicles, never replaces them. A receipt and all imported vehicles commit in one transaction. Retries are idempotent, and a failed/partial request can be retried safely. Legacy IDs deduplicate records within the account; cloud edits take precedence. Originals remain in localStorage even after success. Import is once per account and exact browser snapshot; there is no automatic deletion. Choose Later to hide the prompt for this session. Invalid source data is not silently converted to invented amounts.
 
-## Privacy and caveats
+Local storage is origin-specific: a different deployment domain cannot read old records. Import on the original site origin. Old records without VINs are preserved; edit those details later. Imported trim text is preserved in the combined vehicle name. Mileage is outside the simplified ledger and remains in the original browser backup.
 
-Your cars, VINs, costs, and sale values remain only in the local storage of the browser in which you enter them, not in a shared cloud database. This means you won't see the same records in another browser or phone. Clearing site data can erase them. Export backups regularly. Data in browser storage is not a secure encrypted vault; avoid use on shared public computers.
+## Valuation
 
-The ZIP code used for the CARFAX shortcut is 73013. CARFAX can take mileage, history, and location into account; update the estimate when those factors change. A market value does not guarantee that a particular car can be sold for that amount.
+Manual value entry and a CARFAX lookup link use ZIP **73013**. The lookup attempts to copy the VIN; enter VIN and ZIP on CARFAX yourself. No scraping, NHTSA decoding, fake estimates, or automatic refresh takes place.
+
+CARFAX US routes third-party integrations through its [partnership team](https://www.carfax.com/company/partners). CARFAX Canada advertises an API, but that does not establish US ZIP coverage or authorization for this project. See [`supabase/valuation.md`](supabase/valuation.md) for sources and the backend adapter / 72-hour refresh contract for a future authorized provider. Automatic valuation requires a separate provider agreement, backend credentials, implementation against its actual API, and live validation.
+
+## Validation
+
+Run `node --test tests/finance.test.cjs`. Browser integration tests use Playwright against an explicitly mocked Supabase service: `npm install --no-save --package-lock=false playwright@1.64.1 @electric-sql/pglite@0.5.13` then `node --test tests/browser.test.cjs` (a Chromium installation is required: `npx playwright install chromium`). Run `node --test tests/schema.test.cjs` for embedded PostgreSQL checks of RLS, ownership, revision conflicts, data validation, and import transactions. These checks do not verify a real Supabase project.
+
+Required live checks after setup:
+
+- Sign up, confirm email, log in, reload to confirm session persistence, log out, and reset password through an actual email. Confirm invalid/expired reset links report an error.
+- Add a vehicle and VIN, record purchase and repair costs, edit/remove costs, save an estimate, mark sold with a sale price, clear sale price, and edit/delete a vehicle. Reload to confirm saved values.
+- Log into the same account on a second device; verify changes appear when idle (within 30 seconds or on focus). Edit the same vehicle on both devices and verify the stale save is rejected.
+- Create a second account and verify it sees none of the first account's records. Using that account's access token, attempt select/update/delete against another user's vehicle UUID and an insert with the other user's user_id. RLS must deny changes and return no private rows. Repeat without a session. Never disable RLS to fix a configuration problem.
+- Test import, repeat import, failed import/network retry, and confirm originals remain in browser storage. A cloud import receipt should prevent reimport after cloud deletion.
+- On a phone, test selector, forms, keyboard, scrolling, validation, and dialogs. At 360px wide, expenses and amounts must remain usable without horizontal scrolling.
