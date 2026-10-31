@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <meta name="theme-color" content="#fafaf9">
+  <meta name="theme-color" content="#F3F4F1">
   <meta name="description" content="Carbook — vehicle expenses, value, and profit.">
   <title>Carbook</title>
   <link rel="icon" href="./favicon.svg" type="image/svg+xml">
@@ -17,10 +17,10 @@
 </head>
 <body>
   <div class="shell">
-    <header class="header"><a class="brand" href="./">carbook</a><button id="logout" hidden>Log out</button></header>
-    <div class="status-bar"><p id="status" role="status" aria-live="polite"></p><button id="retry" class="text-button" hidden>Retry</button></div>
+    <header class="header"><a id="home-link" class="brand" href="./" data-route>carbook</a><button id="logout" hidden>Log out</button></header>
+    <div id="status-bar" class="status-bar" hidden><p id="status" role="status" aria-live="polite"></p><button id="retry" class="text-button" hidden>Retry</button></div>
     <section id="auth" class="auth" aria-labelledby="auth-title" hidden>
-      <div class="auth-heading"><h1 id="auth-title">Welcome back</h1><p id="auth-description">Your vehicles. Every dollar accounted for.</p></div>
+      <div class="auth-heading"><h1 id="auth-title">Log in</h1><p id="auth-description" hidden></p></div>
       <form id="auth-form" name="login" method="post" action="./" autocomplete="on">
         <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="254">
         <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
@@ -45,36 +45,40 @@
       <div class="auth-links"><button id="auth-toggle" class="text-button" type="button">Create account</button><button id="forgot" class="text-button" type="button">Reset password</button></div>
     </section>
     <main id="ledger" hidden>
-      <div id="import-prompt" class="import-prompt" hidden><p>Vehicle records were found on this browser. Import them into this account?</p><button id="import-local">Import records</button><button id="dismiss-import">Later</button></div>
-      <div class="toolbar" id="vehicle-toolbar"><label class="sr-only" for="vehicle-select">Vehicle</label><select id="vehicle-select"></select><button id="add-vehicle" class="primary">Add vehicle</button></div>
-      <section id="empty-state" hidden><h1>A place for every vehicle.</h1><p>Keep expenses, value, and profit together.<br>Start with a VIN.</p><button id="empty-add" class="primary" type="button">Add vehicle</button></section>
+      <section id="garage" aria-labelledby="garage-title" hidden>
+        <div class="garage-head"><h1 id="garage-title" tabindex="-1">Garage</h1><button id="add-vehicle" class="primary" type="button">Add vehicle</button></div>
+        <ul id="vehicle-gallery" class="vehicle-gallery" aria-label="Vehicles"></ul>
+        <p id="empty-state" class="empty-state" hidden>No vehicles yet</p>
+      </section>
+      <section id="detail-page" hidden>
+        <nav class="detail-nav" aria-label="Vehicle navigation"><a id="back-garage" class="back-link" href="./" data-route><span aria-hidden="true">←</span> Garage</a></nav>
+        <h1 id="vehicle-missing" tabindex="-1" hidden>Vehicle unavailable</h1>
       <section id="vehicle-view" hidden>
-        <div class="page-head"><div><h1 id="vehicle-title"></h1><p id="vehicle-vin" class="vin"></p></div><button id="edit-vehicle" class="text-button">Edit vehicle</button></div>
+        <div class="page-head"><div><h1 id="vehicle-title" tabindex="-1"></h1><p id="vehicle-vin" class="vin"></p></div><button id="edit-vehicle" class="text-button" aria-label="Edit vehicle">Edit</button></div>
         <div class="details-grid">
           <section class="expenses" aria-labelledby="expenses-heading">
             <h2 id="expenses-heading">Expenses</h2>
-            <div class="expense-head"><span>Description</span><span>Amount</span><span></span></div>
             <div id="expense-list"></div>
-            <p id="expenses-empty" class="expenses-empty" hidden>No expenses recorded.</p>
             <form id="add-expense-form" class="expense-line">
-              <input id="expense-description" aria-label="New expense description" placeholder="Description" maxlength="100" required>
-              <input id="expense-amount" aria-label="New expense amount" placeholder="Amount" type="number" inputmode="decimal" step="0.01" min="0" max="100000000" required>
+              <input id="expense-description" name="description" type="text" aria-label="New expense description" placeholder="Expense" maxlength="100" required>
+              <input id="expense-amount" name="amount" aria-label="New expense amount in dollars" placeholder="$" type="number" inputmode="decimal" step="0.01" min="0" max="100000000" required>
               <button type="submit">Add</button>
             </form>
             <div class="total"><span>Total invested</span><strong id="expense-total"></strong></div>
           </section>
-          <section class="valuation" aria-labelledby="value-heading">
-            <h2 id="value-heading">Value & sale</h2>
+          <section class="valuation" aria-label="Vehicle value and sale">
             <form id="value-form">
-              <label for="estimated-value">Estimated value</label><input id="estimated-value" type="number" inputmode="decimal" step="0.01" min="0" max="100000000" placeholder="Not entered">
+              <label for="estimated-value">Estimated value</label><input id="estimated-value" name="estimated_value" type="number" inputmode="decimal" step="0.01" min="0" max="100000000">
               <p id="value-source" class="caption"></p>
-              <a href="https://www.carfax.com/value/" target="_blank" rel="noopener noreferrer" id="check-carfax">CARFAX lookup · ZIP 73013</a>
-              <label for="sold-price" class="sale-label">Sold price <span class="muted">(optional)</span></label><input id="sold-price" type="number" inputmode="decimal" step="0.01" min="0" max="100000000" placeholder="Unsold">
-              <div class="save-row"><button type="submit">Save values</button><span id="value-dirty" class="caption" hidden>Unsaved</span></div>
+              <a href="https://www.carfax.com/value/" target="_blank" rel="noopener noreferrer" id="check-carfax">CARFAX · 73013</a>
+              <label for="sold-price" class="sale-label">Sold price</label><input id="sold-price" name="sold_price" aria-describedby="sale-help" type="number" inputmode="decimal" step="0.01" min="0" max="100000000">
+              <p id="sale-help" class="sr-only">Leave blank if the vehicle is not sold.</p>
+              <div class="save-row"><button type="submit" aria-label="Save values">Save</button><span id="value-dirty" class="caption" hidden>Unsaved</span></div>
             </form>
             <div class="profit"><span id="profit-label">Potential profit</span><strong id="profit"></strong></div>
           </section>
         </div>
+      </section>
       </section>
     </main>
   </div>
@@ -85,10 +89,10 @@
       <input id="form-vin" name="vin" minlength="17" maxlength="64" pattern="[A-HJ-NPR-Z0-9]{17}" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-describedby="vin-status" required>
       <div id="vin-feedback" class="vin-feedback" aria-live="polite" aria-atomic="true">
         <p id="decoded-name" hidden></p>
-        <p id="vin-status" class="field-help">17 characters. We’ll find the vehicle details.</p>
+        <p id="vin-status" class="field-help">17-character VIN</p>
       </div>
       <div class="decode-actions"><button id="manual-entry" type="button" class="text-button" hidden>Enter details manually</button><button id="retry-vin" type="button" class="text-button" hidden>Try again</button></div>
-      <div id="manual-details" hidden><label for="form-name">Vehicle details</label><input id="form-name" name="vehicle" maxlength="150" autocomplete="off"><p class="field-help">Enter the year, make, and model.</p></div>
+      <div id="manual-details" hidden><label for="form-name">Vehicle details</label><input id="form-name" name="vehicle" maxlength="150" autocomplete="off"><p class="field-help">Year, make, and model.</p></div>
       <p id="form-error" role="alert"></p>
       <div class="dialog-actions"><button id="delete-vehicle" class="danger text-button" type="button" aria-label="Delete vehicle" hidden>Delete</button><span></span><button id="cancel-dialog" type="button">Cancel</button><button id="save-vehicle" class="primary" type="submit">Add vehicle</button></div>
     </form>

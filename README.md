@@ -4,7 +4,7 @@ A small HTML/CSS/JavaScript vehicle ledger. Expenses, estimated value, optional 
 
 ## One-time Supabase setup
 
-The existing public Supabase configuration is preserved. The interface tests use a mock service and do not establish live login, email delivery, or cloud saving verification. Follow these steps for a new Supabase project or deployment; existing configured projects do not need a schema change for this interface update. Existing `carbook.records.v2` browser data is untouched.
+The existing public Supabase configuration is preserved. Read-only live checks confirmed that the configured Auth endpoint responds and anonymous vehicle access is denied. Authenticated saving, login, and email delivery are not live-verified; the browser regression tests use a mock service. Follow these steps for a new Supabase project or deployment; existing configured projects do not need a schema change for this interface update. Existing `carbook.records.v2` browser data is untouched.
 
 1. Create a Supabase project at https://supabase.com/dashboard. Keep its database password private.
 2. Open **SQL Editor → New query**, paste all of [`supabase/schema.sql`](supabase/schema.sql), and run it once against the new database. This creates vehicles, expenses stored as validated JSON per vehicle, valuation metadata, import receipts, owner-only RLS policies, and a transactional import function. It does not seed any financial data. Do not run it on top of an unrelated existing schema.
@@ -26,11 +26,17 @@ For local preview: `python3 -m http.server 5173` and open http://localhost:5173/
 
 ## Saving and device sync
 
-Every save waits for Supabase before showing “Saved.” Fields use explicit Save buttons; unsaved changes are indicated and navigation warns before discarding them. Failed saves leave input visible for retry. A revision check prevents stale saves from overwriting a concurrent edit; reload after a conflict. Browser edits are not an offline queue: keep the page open and retry if a network request fails.
+“Saving…” appears during an actual save. “Saved” appears only after Supabase confirms success, then fades out after about two seconds. Neither initial loading nor background synchronization reports a successful save. Notifications occupy no layout space when hidden. Saving errors remain visible while editing or waiting; retrying successfully resolves them. Fields use explicit Save buttons; unsaved changes are indicated and navigation warns before discarding them. Failed saves leave input visible for retry. A revision check prevents stale saves from overwriting a concurrent edit; reload after a conflict. Browser edits are not an offline queue: keep the page open and retry if a network request fails.
 
 Signed-in sessions persist using the Supabase SDK and refresh automatically. Cloud records are fetched after login, on focus/online, and approximately every 30 seconds while visible and idle. Polling pauses while edits or a vehicle dialog are open. This does not require enabling Realtime. Logout clears the current device session and visible account records.
 
 Expenses include the purchase price: record it as an expense to include it in total invested. Profit is estimated value minus expenses when unsold, and sold price minus expenses when sold. Blank means unknown; zero is a valid recorded amount. A sale price marks a vehicle sold; clear it to mark unsold. Calculations sum integer cents. Estimates are manually entered and their source/date is stored. Changing a VIN clears the previous estimate to avoid showing a value for another vehicle.
+
+## Garage and vehicle links
+
+The homepage is a responsive gallery of the signed-in user's Supabase vehicles. Each card links to `?vehicle=VEHICLE_ID`. It shows recorded vehicle details and profit only when an estimate or sold price is available. Add vehicle appears only in the garage.
+
+Vehicle detail links survive refresh and login, and browser back/forward works without a router dependency or hosting rewrite. The Garage link returns to the gallery. Missing or inaccessible vehicle IDs show a neutral unavailable state; they never fall back to another vehicle. Unsaved edits require confirmation before navigation; navigation during an active save is blocked until it completes. Deletion returns to the garage after Supabase confirms it.
 
 ## Vehicle entry and interactions
 
@@ -38,15 +44,15 @@ Add a vehicle by pasting its VIN. Whitespace is removed and letters are normaliz
 
 The decoder only accepts a complete result with NHTSA error code 0. Uncertain/invalid results, missing fields, and outages offer **Enter details manually** and a retry. Manual correction never invents missing data. Changing a VIN cancels the previous request so a delayed response cannot overwrite the current result. Opening an existing vehicle preserves its stored name and VIN without automatically decoding or renaming it; **Correct details** allows a deliberate name edit. Legacy vehicles without VINs can still be edited. The existing database schema is unchanged.
 
-The centered ledger uses one surface for expenses and values, with compact rows and explicit saving. A row's **Remove** action becomes **Save** while its fields are edited. Saved changes never erase another form's unsaved draft. Subtle entrance, modal, vehicle-switch, and expense transitions use 160–240ms motion. All motion is disabled when the system requests reduced motion.
+The centered ledger uses one surface for expenses and values, with compact rows and explicit saving. A row's **Remove** action becomes **Save** while its fields are edited. Saved changes never erase another form's unsaved draft. Subtle entrance, gallery/detail, modal, and expense transitions use 160–240ms motion. All motion is disabled when the system requests reduced motion.
 
 Login, registration, reset email, and replacement-password forms have stable, separate IDs and native POST form semantics. Email fields use `autocomplete="username"`; login uses `current-password` and registration/replacement use `new-password`. Credentials remain in their native controls during submission for password managers, with no paste interception or composition rules that block generated passwords. Browser tests verify labels, field association, autocomplete metadata, keyboard submission, and autofill-like value assignment. Actual save/generation prompts in iCloud Keychain, Safari, and password-manager extensions still require device-level testing.
 
 ## Existing browser records
 
-On the same origin/browser where the previous site stored data, login offers an explicit import into the displayed account. Import merges with cloud vehicles, never replaces them. A receipt and all imported vehicles commit in one transaction. Retries are idempotent, and a failed/partial request can be retried safely. Legacy IDs deduplicate records within the account; cloud edits take precedence. Originals remain in localStorage even after success. Import is once per account and exact browser snapshot; there is no automatic deletion. Choose Later to hide the prompt for this session. Invalid source data is not silently converted to invented amounts.
+The browser-record migration experience has been removed. The client does not read, import, or delete `carbook.records.v2`, and it never suggests an import on login or signup. The garage reads only the user's Supabase records. Existing cloud vehicles are unchanged.
 
-Local storage is origin-specific: a different deployment domain cannot read old records. Import on the original site origin. Old records without VINs are preserved; edit those details later. Imported trim text is preserved in the combined vehicle name. Mileage is outside the simplified ledger and remains in the original browser backup.
+The database's legacy import function, receipt table, policies, and legacy keys remain intact for compatibility and data preservation. No database migration is required; do not drop those objects as part of this UI update. Their existing SQL regression tests remain in place.
 
 ## Valuation
 
@@ -56,7 +62,7 @@ CARFAX US routes third-party integrations through its [partnership team](https:/
 
 ## Validation
 
-Run `node --test tests/finance.test.cjs tests/vin.test.cjs`. Browser integration tests use Playwright against an explicitly mocked Supabase service: `npm install --no-save --package-lock=false playwright@1.64.1 @electric-sql/pglite@0.5.13` then `node --test tests/browser.test.cjs tests/interface.test.cjs` (a Chromium installation is required: `npx playwright install chromium`). Run `node --test tests/schema.test.cjs` for embedded PostgreSQL checks of RLS, ownership, revision conflicts, data validation, and import transactions. These checks do not verify a real Supabase project. The interface tests include 320px, 360px, 390px, 760px, and desktop layouts; native auth-form semantics; decoding, fallback, stale responses, safe editing, reduced motion, and saving behavior. To include a real NHTSA browser request using a public test VIN, run `CARBOOK_LIVE_VIN=1 node --test tests/interface.test.cjs`. Both browser suites override config.js and Supabase so they never read or write your live account records.
+Run `node --test tests/finance.test.cjs tests/vin.test.cjs`. Browser integration tests use Playwright against an explicitly mocked Supabase service: `npm install --no-save --package-lock=false playwright@1.64.1 @electric-sql/pglite@0.5.13` then `node --test tests/browser.test.cjs tests/interface.test.cjs` (a Chromium installation is required: `npx playwright install chromium`). Run `node --test tests/schema.test.cjs` for embedded PostgreSQL checks of RLS, ownership, revision conflicts, data validation, and import transactions. These checks do not verify a real Supabase project. The interface tests include 320px, 360px, 390px, 760px, and desktop layouts; native auth-form semantics; decoding, fallback, stale responses, safe editing, reduced motion, gallery layouts, direct links, browser history, unsaved-navigation guards, two-second save feedback, persistent errors, and absence of migration prompts. To include a real NHTSA browser request using a public test VIN, run `CARBOOK_LIVE_VIN=1 node --test tests/interface.test.cjs`. Both browser suites override config.js and Supabase so they never read or write your live account records.
 
 Required live checks after setup:
 
@@ -64,5 +70,5 @@ Required live checks after setup:
 - Add a vehicle by VIN, confirm the decoded details, record purchase and repair costs, edit/remove costs, save an estimate, mark sold with a sale price, clear sale price, and edit/delete a vehicle. Reload to confirm saved values.
 - Log into the same account on a second device; verify changes appear when idle (within 30 seconds or on focus). Edit the same vehicle on both devices and verify the stale save is rejected.
 - Create a second account and verify it sees none of the first account's records. Using that account's access token, attempt select/update/delete against another user's vehicle UUID and an insert with the other user's user_id. RLS must deny changes and return no private rows. Repeat without a session. Never disable RLS to fix a configuration problem.
-- Test import, repeat import, failed import/network retry, and confirm originals remain in browser storage. A cloud import receipt should prevent reimport after cloud deletion.
-- On a phone, test selector, forms, keyboard, scrolling, validation, and dialogs. At 360px wide, expenses and amounts must remain usable without horizontal scrolling.
+- Verify that login/signup never offers a browser import and old browser records remain untouched.
+- Open a direct vehicle link, refresh, and navigate back/forward. On a phone, test gallery cards, forms, keyboard, scrolling, validation, and dialogs. At 360px wide, expenses and amounts must remain usable without horizontal scrolling.

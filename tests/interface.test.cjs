@@ -18,7 +18,7 @@ test('VIN-only entry: preview, validation, failure fallback, stale response canc
       return respond(route,route.request().url().includes(OTHER) ? result({ModelYear:'2011',Make:'BMW',Model:'X3'}) : result());
     });
     await page.screenshot({animations:'disabled',path:'/tmp/carbook-empty-refined.png'});
-    await page.locator('#empty-add').click();
+    await page.locator('#add-vehicle').click();
     assert.equal(await page.locator('#vehicle-form input:visible').count(),1);
     assert.equal(await page.locator('#form-vin').getAttribute('placeholder'),null);
     await page.locator('#form-vin').fill('invalid');
@@ -35,7 +35,7 @@ test('VIN-only entry: preview, validation, failure fallback, stale response canc
     await page.locator('#vehicle-dialog').waitFor({state:'hidden'});
     assert.equal(await recordCount(page),1);
     // Incomplete details never become an invented display name.
-    mode='missing';await page.locator('#add-vehicle').click();await page.locator('#form-vin').fill(VIN);
+    mode='missing';await page.locator('#back-garage').click();await page.locator('#add-vehicle').click();await page.locator('#form-vin').fill(VIN);
     await page.locator('#vin-status').getByText('NHTSA returned incomplete details.',{exact:false}).waitFor();
     assert.equal(await page.locator('#decoded-name').isVisible(),false);
     assert.equal(await page.locator('#save-vehicle').isDisabled(),true);
@@ -47,7 +47,7 @@ test('VIN-only entry: preview, validation, failure fallback, stale response canc
     await page.locator('#save-vehicle').click();await page.locator('#vehicle-title').getByText('2003 Honda Accord EX',{exact:true}).waitFor();
     await page.locator('#vehicle-dialog').waitFor({state:'hidden'});
     // A delayed result for an old VIN cannot replace the current one.
-    mode='slow';await page.locator('#add-vehicle').click();await page.locator('#form-vin').fill(VIN);
+    mode='slow';await page.locator('#back-garage').click();await page.locator('#add-vehicle').click();await page.locator('#form-vin').fill(VIN);
     await page.waitForFunction(()=>document.getElementById('vin-feedback').getAttribute('aria-busy')==='true');
     for (let attempt=0; !releaseOld && attempt<100; attempt++) await new Promise(resolve=>setTimeout(resolve,20));
     assert.ok(releaseOld,'old VIN request started');
@@ -57,7 +57,7 @@ test('VIN-only entry: preview, validation, failure fallback, stale response canc
     const data=await page.evaluate(()=>JSON.parse(localStorage.getItem('test.db')).vehicles);
     assert.equal(data.at(-1).vin,OTHER);assert.equal(data.at(-1).name,'2011 BMW X3');
     // Escape closes with restored focus; no delayed response leaks into another dialog.
-    mode='success';await page.locator('#add-vehicle').click();await page.keyboard.press('Escape');await page.locator('#vehicle-dialog').waitFor({state:'hidden'});
+    mode='success';await page.locator('#back-garage').click();await page.locator('#add-vehicle').click();await page.keyboard.press('Escape');await page.locator('#vehicle-dialog').waitFor({state:'hidden'});
     assert.equal(await page.locator('#add-vehicle').evaluate(el=>el===document.activeElement),true);
     assert.deepEqual(env.errors,[]);
   } finally {await env.close();}
@@ -89,7 +89,7 @@ test('authentication fields expose native password-manager semantics and submit 
 });
 
 test('refined layouts, reduced motion, stable saving status, and safe vehicle editing', async()=>{
-  const env=await app({records:[fixture]});const {page}=env;
+  const env=await app({records:[fixture],route:'?vehicle=test-car'});const {page}=env;
   try {
     let requests=0;
     await page.route('https://vpic.nhtsa.dot.gov/**',route=>{requests++;return respond(route,result({ModelYear:'2011',Make:'BMW',Model:'X3'}));});
@@ -133,9 +133,142 @@ test('refined layouts, reduced motion, stable saving status, and safe vehicle ed
 test('official NHTSA VIN decode in a browser (opt-in network check)', {skip:!process.env.CARBOOK_LIVE_VIN}, async()=>{
   const env=await app();
   try {
-    await env.page.locator('#empty-add').click();await env.page.locator('#form-vin').fill(VIN);
+    await env.page.locator('#add-vehicle').click();await env.page.locator('#form-vin').fill(VIN);
     await env.page.locator('#decoded-name').getByText('2003 HONDA Accord').waitFor({timeout:15000});
     assert.equal(await recordCount(env.page),0);
+    assert.deepEqual(env.errors,[]);
+  } finally {await env.close();}
+});
+
+test('garage cards, direct links, refresh, browser history, and no migration experience', async()=>{
+  const records=[fixture,
+    {...fixture,id:'sold-car',name:'2013 BMW 135i',expenses:[{id:'buy',description:'Purchase',amount:10000}],sold_price:12500},
+    {...fixture,id:'unvalued-car',name:'2018 Volvo V60',vin:'',expenses:[],estimated_value:null},
+    {...fixture,id:'zero-car',name:'2008 Honda Fit',expenses:[],estimated_value:0}
+  ];
+  const legacy='An untouched legacy browser backup';
+  const env=await app({records,legacy});const {page,url}=env;
+  try {
+    assert.equal(await page.locator('.vehicle-card').count(),4);
+    assert.equal(await page.locator('#vehicle-select').count(),0);
+    assert.equal(await page.locator('#import-prompt, #import-local, #dismiss-import').count(),0);
+    assert.equal(await page.locator('#status-bar').isVisible(),false);
+    assert.equal(await page.locator('[data-vehicle="test-car"] .card-profit strong').textContent(),'$1,300.50');
+    assert.equal(await page.locator('[data-vehicle="sold-car"] .card-profit span').textContent(),'Actual profit');
+    assert.equal(await page.locator('[data-vehicle="sold-car"] .card-profit strong').textContent(),'$2,500.00');
+    assert.equal(await page.locator('[data-vehicle="unvalued-car"] .card-profit').count(),0);
+    assert.equal(await page.locator('[data-vehicle="zero-car"] .card-profit strong').textContent(),'$0.00');
+    await page.screenshot({animations:'disabled',path:'/tmp/carbook-garage-desktop.png',fullPage:true});
+    for (const width of [760,390,320]) {
+      await page.setViewportSize({width,height:850});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      if(width===390) await page.screenshot({animations:'disabled',path:'/tmp/carbook-garage-mobile.png',fullPage:true});
+    }
+    await page.setViewportSize({width:1280,height:900});
+    await page.locator('[data-vehicle="test-car"]').focus();await page.keyboard.press('Enter');
+    await page.locator('#vehicle-title').getByText(fixture.name,{exact:true}).waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('vehicle'),fixture.id);
+    assert.equal(await page.locator('#add-vehicle').isVisible(),false);
+    assert.equal(await page.locator('.expense-head, #expenses-empty').count(),0);
+    assert.equal(await page.locator('#vehicle-title').evaluate(el=>el===document.activeElement),true);
+    await page.reload();await page.locator('#vehicle-view').waitFor({state:'visible'});
+    assert.equal(await page.locator('#vehicle-title').textContent(),fixture.name);
+    assert.equal(await page.locator('#status-bar').isVisible(),false);
+    await page.goBack();await page.locator('#garage').waitFor({state:'visible'});
+    await page.goForward();await page.locator('#vehicle-view').waitFor({state:'visible'});
+    await page.locator('#back-garage').click();await page.locator('[data-vehicle="sold-car"]').click();
+    await page.locator('#vehicle-title').getByText('2013 BMW 135i',{exact:true}).waitFor();
+    assert.equal(await page.locator('#profit-label').textContent(),'Actual profit');
+    await page.goto(url+'?vehicle=unvalued-car');await page.locator('#vehicle-view').waitFor({state:'visible'});
+    assert.equal(await page.locator('#vehicle-title').textContent(),'2018 Volvo V60');
+    assert.equal(await page.locator('#profit').textContent(),'—');
+    await page.goto(url+'?vehicle=missing');await page.locator('#vehicle-missing').waitFor({state:'visible'});
+    assert.equal(await page.locator('#add-vehicle').isVisible(),false);
+    await page.locator('#back-garage').click();await page.locator('#garage').waitFor({state:'visible'});
+    assert.equal(await page.evaluate(()=>localStorage.getItem('carbook.records.v2')),legacy);
+    assert.equal(await page.evaluate(()=>window.testCloudCalls.every(call=>call.table==='vehicles'&&call.type==='select')),true);
+    assert.deepEqual(await page.evaluate(()=>JSON.parse(localStorage.getItem('test.db')).vehicles),records);
+    await page.emulateMedia({reducedMotion:'reduce'});await page.locator('[data-vehicle="test-car"]').click();
+    assert.equal(await page.evaluate(()=>document.getAnimations().length),0);
+    assert.deepEqual(env.errors,[]);
+  } finally {await env.close();}
+});
+
+test('unsaved browser navigation is reversible and active saves retain the correct vehicle', async()=>{
+  const env=await app({records:[fixture]});const {page}=env;
+  try {
+    await page.locator('.vehicle-card').click();await page.locator('#vehicle-view').waitFor({state:'visible'});
+    await page.locator('#estimated-value').fill('9999');
+    const historyLength=await page.evaluate(()=>history.length);
+    page.removeAllListeners('dialog');
+    const rejected=page.waitForEvent('dialog');await page.evaluate(()=>history.back());await (await rejected).dismiss();
+    await page.waitForFunction(()=>new URL(location.href).searchParams.get('vehicle')==='test-car'&&history.state.carbookIndex===1);
+    assert.equal(await page.locator('#estimated-value').inputValue(),'9999');
+    assert.equal(await page.evaluate(()=>history.length),historyLength);
+    const accepted=page.waitForEvent('dialog');await page.evaluate(()=>history.back());await (await accepted).accept();
+    await page.locator('#garage').waitFor({state:'visible'});
+    await page.goForward();await page.locator('#vehicle-view').waitFor({state:'visible'});
+    assert.equal(await page.locator('#estimated-value').inputValue(),'8500');
+    await page.evaluate(()=>localStorage.setItem('test.saveDelay','450'));
+    await page.locator('#estimated-value').fill('8600');await page.locator('#value-form button').click();
+    await page.locator('#status').getByText('Saving…',{exact:true}).waitFor();
+    await page.evaluate(()=>history.back());
+    await page.waitForFunction(()=>new URL(location.href).searchParams.get('vehicle')==='test-car'&&history.state.carbookIndex===1);
+    await page.locator('#status').getByText('Saved',{exact:true}).waitFor();
+    assert.equal(await page.locator('#vehicle-view').isVisible(),true);
+    assert.equal(await page.locator('#estimated-value').inputValue(),'8600');
+    await page.goBack();await page.locator('#garage').waitFor({state:'visible'});
+    assert.equal(await page.locator('.card-profit strong').textContent(),'$1,400.50');
+    assert.deepEqual(env.errors,[]);
+  } finally {await env.close();}
+});
+
+test('save feedback waits for confirmation, expires without layout space, and preserves errors', async()=>{
+  const env=await app({records:[fixture],route:'?vehicle=test-car'});const {page}=env;
+  try {
+    await page.screenshot({animations:'disabled',path:'/tmp/carbook-detail-desktop.png',fullPage:true});
+    const top=await page.locator('#vehicle-view').evaluate(el=>el.getBoundingClientRect().top);
+    assert.equal(await page.locator('#status-bar').isVisible(),false);
+    await page.evaluate(()=>localStorage.setItem('test.saveDelay','350'));
+    await page.locator('#estimated-value').fill('8600');await page.locator('#value-form button').click();
+    await page.locator('#status').getByText('Saving…',{exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].estimated_value),8500);
+    await page.locator('#status').getByText('Saved',{exact:true}).waitFor();
+    const confirmed=Date.now();
+    assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].estimated_value),8600);
+    await page.waitForTimeout(1400);assert.equal(await page.locator('#status').textContent(),'Saved');
+    await page.locator('#status-bar').waitFor({state:'hidden',timeout:2000});
+    assert.ok(Date.now()-confirmed>=1800);assert.ok(Date.now()-confirmed<3500);
+    assert.equal(await page.locator('#vehicle-view').evaluate(el=>el.getBoundingClientRect().top),top);
+    assert.equal(await page.locator('#status-bar').evaluate(el=>el.getBoundingClientRect().height),0);
+    await page.evaluate(()=>{localStorage.removeItem('test.saveDelay');localStorage.setItem('test.failSave','1');});
+    await page.locator('#estimated-value').fill('9000');await page.locator('#value-form button').click();
+    await page.locator('#status').getByText('Network unavailable',{exact:true}).waitFor();
+    await page.locator('#estimated-value').fill('9100');await page.locator('#estimated-value').blur();
+    await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
+    await page.waitForTimeout(2400);
+    assert.equal(await page.locator('#status').textContent(),'Network unavailable');
+    assert.equal(await page.locator('#estimated-value').inputValue(),'9100');
+    assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('test.db')).vehicles[0].estimated_value),8600);
+    await page.evaluate(()=>localStorage.removeItem('test.failSave'));await page.locator('#value-form button').click();
+    await page.locator('#status').getByText('Saved',{exact:true}).waitFor();
+    await page.reload();await page.locator('#vehicle-view').waitFor({state:'visible'});
+    assert.equal(await page.locator('#status-bar').isVisible(),false);
+    await page.setViewportSize({width:390,height:850});await page.screenshot({animations:'disabled',path:'/tmp/carbook-detail-mobile.png',fullPage:true});
+    assert.deepEqual(env.errors,[]);
+  } finally {await env.close();}
+});
+
+test('a direct vehicle link survives login without touching browser-local records', async()=>{
+  const legacy=JSON.stringify([{id:'old-record',name:'Local only',expenses:[]}]);
+  const env=await app({signedIn:false,records:[fixture],route:'?vehicle=test-car',legacy});const {page}=env;
+  try {
+    await page.locator('#email').fill('test@example.com');await page.locator('#password').fill('password123');await page.locator('#password').press('Enter');
+    await page.locator('#vehicle-title').getByText(fixture.name,{exact:true}).waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('vehicle'),'test-car');
+    assert.equal(await page.locator('#import-prompt').count(),0);
+    assert.equal(await page.evaluate(()=>localStorage.getItem('carbook.records.v2')),legacy);
+    assert.equal(await page.evaluate(()=>window.testCloudCalls.every(call=>call.type==='select'&&call.table==='vehicles')),true);
     assert.deepEqual(env.errors,[]);
   } finally {await env.close();}
 });

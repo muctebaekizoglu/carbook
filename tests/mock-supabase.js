@@ -17,6 +17,7 @@ window.supabase = {createClient() {
     async updateUser() {localStorage.setItem('test.passwordUpdated','yes'); return {data:{}};},
     async signOut() {localStorage.removeItem('test.session'); emit('SIGNED_OUT',null); return {};}
   };
+  window.testCloudCalls = [];
   return {auth,from(table) {
     let type='select', payload, filters=[], single=false;
     const q = {
@@ -25,8 +26,10 @@ window.supabase = {createClient() {
       update(value) {type='update';payload=value;return q;},
       delete() {type='delete';return q;}, eq(key,value) {filters.push([key,value]);return q;},
       single() {single=true;return q;},
-      then(resolve,reject) {return Promise.resolve().then(() => {
-        if (localStorage.getItem('test.fail')) return {error:{message:'Network unavailable'}};
+      then(resolve,reject) {return Promise.resolve().then(async () => {
+        window.testCloudCalls.push({table,type});
+        if (type !== 'select' && localStorage.getItem('test.saveDelay')) await new Promise(resolve=>setTimeout(resolve,Number(localStorage.getItem('test.saveDelay'))));
+        if (localStorage.getItem('test.fail') || (type !== 'select' && localStorage.getItem('test.failSave'))) return {error:{message:'Network unavailable'}};
         const data = db(), uid = session()?.user.id;
         const matches = item => item.user_id === uid && filters.every(([k,v]) => item[k] === v);
         let rows = data[table].filter(matches);
@@ -41,13 +44,5 @@ window.supabase = {createClient() {
         return {data:single?rows[0]:rows};
       }).then(resolve,reject);}
     }; return q;
-  },async rpc(name,{source,records}) {
-    if (localStorage.getItem('test.fail')) return {error:{message:'Network unavailable'}};
-    const data=db(),uid=session().user.id;
-    if (!data.imports.some(item=>item.user_id===uid&&item.source_key===source)) {
-      for (const row of records) if (!data.vehicles.some(v=>v.user_id===uid&&v.legacy_key===row.legacy_key)) data.vehicles.push({id:crypto.randomUUID(),user_id:uid,revision:1,...row});
-      data.imports.push({user_id:uid,source_key:source});store(data);
-    }
-    return {data:null};
   }};
 }};
