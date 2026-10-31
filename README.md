@@ -4,7 +4,7 @@ A small HTML/CSS/JavaScript vehicle ledger. Expenses, estimated value, optional 
 
 ## One-time Supabase setup
 
-Cloud saving is implemented but **not configured or live-verified** in this checkout. No credentials were present. Until configured, the page displays a setup message and does not claim records are saved. Existing `carbook.records.v2` browser data is untouched.
+The existing public Supabase configuration is preserved. The interface tests use a mock service and do not establish live login, email delivery, or cloud saving verification. Follow these steps for a new Supabase project or deployment; existing configured projects do not need a schema change for this interface update. Existing `carbook.records.v2` browser data is untouched.
 
 1. Create a Supabase project at https://supabase.com/dashboard. Keep its database password private.
 2. Open **SQL Editor → New query**, paste all of [`supabase/schema.sql`](supabase/schema.sql), and run it once against the new database. This creates vehicles, expenses stored as validated JSON per vehicle, valuation metadata, import receipts, owner-only RLS policies, and a transactional import function. It does not seed any financial data. Do not run it on top of an unrelated existing schema.
@@ -32,6 +32,16 @@ Signed-in sessions persist using the Supabase SDK and refresh automatically. Clo
 
 Expenses include the purchase price: record it as an expense to include it in total invested. Profit is estimated value minus expenses when unsold, and sold price minus expenses when sold. Blank means unknown; zero is a valid recorded amount. A sale price marks a vehicle sold; clear it to mark unsold. Calculations sum integer cents. Estimates are manually entered and their source/date is stored. Changing a VIN clears the previous estimate to avoid showing a value for another vehicle.
 
+## Vehicle entry and interactions
+
+Add a vehicle by pasting its VIN. Whitespace is removed and letters are normalized to uppercase; the form accepts exactly 17 characters excluding I, O, and Q. The official [NHTSA vPIC API](https://vpic.nhtsa.dot.gov/api/) retrieves model year, make, and model, which appear before saving and become the display name. No example vehicle or default name is inserted. The request goes directly from the browser to NHTSA without credentials, and times out after 10 seconds.
+
+The decoder only accepts a complete result with NHTSA error code 0. Uncertain/invalid results, missing fields, and outages offer **Enter details manually** and a retry. Manual correction never invents missing data. Changing a VIN cancels the previous request so a delayed response cannot overwrite the current result. Opening an existing vehicle preserves its stored name and VIN without automatically decoding or renaming it; **Correct details** allows a deliberate name edit. Legacy vehicles without VINs can still be edited. The existing database schema is unchanged.
+
+The centered ledger uses one surface for expenses and values, with compact rows and explicit saving. A row's **Remove** action becomes **Save** while its fields are edited. Saved changes never erase another form's unsaved draft. Subtle entrance, modal, vehicle-switch, and expense transitions use 160–240ms motion. All motion is disabled when the system requests reduced motion.
+
+Login, registration, reset email, and replacement-password forms have stable, separate IDs and native POST form semantics. Email fields use `autocomplete="username"`; login uses `current-password` and registration/replacement use `new-password`. Credentials remain in their native controls during submission for password managers, with no paste interception or composition rules that block generated passwords. Browser tests verify labels, field association, autocomplete metadata, keyboard submission, and autofill-like value assignment. Actual save/generation prompts in iCloud Keychain, Safari, and password-manager extensions still require device-level testing.
+
 ## Existing browser records
 
 On the same origin/browser where the previous site stored data, login offers an explicit import into the displayed account. Import merges with cloud vehicles, never replaces them. A receipt and all imported vehicles commit in one transaction. Retries are idempotent, and a failed/partial request can be retried safely. Legacy IDs deduplicate records within the account; cloud edits take precedence. Originals remain in localStorage even after success. Import is once per account and exact browser snapshot; there is no automatic deletion. Choose Later to hide the prompt for this session. Invalid source data is not silently converted to invented amounts.
@@ -40,18 +50,18 @@ Local storage is origin-specific: a different deployment domain cannot read old 
 
 ## Valuation
 
-Manual value entry and a CARFAX lookup link use ZIP **73013**. The lookup attempts to copy the VIN; enter VIN and ZIP on CARFAX yourself. No scraping, NHTSA decoding, fake estimates, or automatic refresh takes place.
+Manual value entry and a CARFAX lookup link use ZIP **73013**. The lookup attempts to copy the VIN; enter VIN and ZIP on CARFAX yourself. No scraping, fake estimates, or automatic valuation refresh takes place. NHTSA decoding supplies vehicle identity only, not a financial value.
 
 CARFAX US routes third-party integrations through its [partnership team](https://www.carfax.com/company/partners). CARFAX Canada advertises an API, but that does not establish US ZIP coverage or authorization for this project. See [`supabase/valuation.md`](supabase/valuation.md) for sources and the backend adapter / 72-hour refresh contract for a future authorized provider. Automatic valuation requires a separate provider agreement, backend credentials, implementation against its actual API, and live validation.
 
 ## Validation
 
-Run `node --test tests/finance.test.cjs`. Browser integration tests use Playwright against an explicitly mocked Supabase service: `npm install --no-save --package-lock=false playwright@1.64.1 @electric-sql/pglite@0.5.13` then `node --test tests/browser.test.cjs` (a Chromium installation is required: `npx playwright install chromium`). Run `node --test tests/schema.test.cjs` for embedded PostgreSQL checks of RLS, ownership, revision conflicts, data validation, and import transactions. These checks do not verify a real Supabase project.
+Run `node --test tests/finance.test.cjs tests/vin.test.cjs`. Browser integration tests use Playwright against an explicitly mocked Supabase service: `npm install --no-save --package-lock=false playwright@1.64.1 @electric-sql/pglite@0.5.13` then `node --test tests/browser.test.cjs tests/interface.test.cjs` (a Chromium installation is required: `npx playwright install chromium`). Run `node --test tests/schema.test.cjs` for embedded PostgreSQL checks of RLS, ownership, revision conflicts, data validation, and import transactions. These checks do not verify a real Supabase project. The interface tests include 320px, 360px, 390px, 760px, and desktop layouts; native auth-form semantics; decoding, fallback, stale responses, safe editing, reduced motion, and saving behavior. To include a real NHTSA browser request using a public test VIN, run `CARBOOK_LIVE_VIN=1 node --test tests/interface.test.cjs`. Both browser suites override config.js and Supabase so they never read or write your live account records.
 
 Required live checks after setup:
 
 - Sign up, confirm email, log in, reload to confirm session persistence, log out, and reset password through an actual email. Confirm invalid/expired reset links report an error.
-- Add a vehicle and VIN, record purchase and repair costs, edit/remove costs, save an estimate, mark sold with a sale price, clear sale price, and edit/delete a vehicle. Reload to confirm saved values.
+- Add a vehicle by VIN, confirm the decoded details, record purchase and repair costs, edit/remove costs, save an estimate, mark sold with a sale price, clear sale price, and edit/delete a vehicle. Reload to confirm saved values.
 - Log into the same account on a second device; verify changes appear when idle (within 30 seconds or on focus). Edit the same vehicle on both devices and verify the stale save is rejected.
 - Create a second account and verify it sees none of the first account's records. Using that account's access token, attempt select/update/delete against another user's vehicle UUID and an insert with the other user's user_id. RLS must deny changes and return no private rows. Repeat without a session. Never disable RLS to fix a configuration problem.
 - Test import, repeat import, failed import/network retry, and confirm originals remain in browser storage. A cloud import receipt should prevent reimport after cloud deletion.
